@@ -64,6 +64,8 @@ public:
     subagent_runner(const agent_config & parent_config,
                     const tool_context & parent_tool_ctx);
 
+    ~subagent_runner();
+
     // Run a subagent synchronously (blocking)
     subagent_result run(const subagent_params & params);
 

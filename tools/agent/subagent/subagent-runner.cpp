@@ -17,6 +17,22 @@ subagent_runner::subagent_runner(const agent_config & parent_config,
 {
 }
 
+subagent_runner::~subagent_runner() {
+    // Join any remaining background threads so their std::thread members are
+    // not joinable when destroyed. This matters at process exit: g_runners
+    // (tool-task.cpp) is a static and is torn down in the exit handlers; if the
+    // model exited without resuming a background task, its thread was still
+    // joinable -> std::thread::~thread() called std::terminate() ("terminate
+    // called without an active exception", benchmark D1 crash). The thread's
+    // lambda already removes its output buffer on completion, so no extra
+    // cleanup is needed here.
+    for (auto & [id, task] : tasks_) {
+        if (task->thread.joinable()) {
+            task->thread.join();
+        }
+    }
+}
+
 std::string subagent_runner::build_system_prompt(subagent_type type) const {
     const auto & config = get_subagent_config(type);
 
