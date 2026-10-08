@@ -1579,6 +1579,11 @@ int main(int argc, char ** argv) {
     }
 
     console::set_display(DISPLAY_TYPE_RESET);
+    // Non-interactive single-turn runs (CI/scripts): print session stats on exit —
+    // there is no TUI status line or /stats command in this mode.
+    if (!tui && params.single_turn) {
+        console::log("%s", stats_text(agent.get_stats()).c_str());
+    }
     console::log("\nExiting...\n");
 
 #ifndef _WIN32
