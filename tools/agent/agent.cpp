@@ -16,6 +16,7 @@
 #include "terminal-image.h"
 #include "tui-renderer.h"
 #include "tool-registry.h"
+#include "subagent/subagent-display.h"
 #include "permission.h"
 #include "log.h"
 #include "chat.h"
@@ -590,6 +591,9 @@ int main(int argc, char ** argv) {
     // Check for custom flags before common_params_parse
     bool yolo_mode = false;
     int max_iterations = 0;  // 0 = unlimited (default)
+    bool enable_subagents = false;
+    int max_subagent_depth = 0;  // 0 = disabled, 1-5 = nesting depth
+    bool subagent_own_slot = false;
     bool enable_mcp = true;
     bool enable_skills = true;
     bool enable_agents_md = true;
@@ -729,6 +733,49 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "--max-iterations requires a value\n");
                 return 1;
             }
+        } else if (arg == "--subagents") {
+            enable_subagents = true;
+            max_subagent_depth = std::max(max_subagent_depth, 1);
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
+        } else if (arg == "--no-subagents") {
+            enable_subagents = false;
+            max_subagent_depth = 0;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
+        } else if (arg == "--max-subagent-depth") {
+            if (i + 1 < argc) {
+                try {
+                    max_subagent_depth = std::stoi(argv[i + 1]);
+                    if (max_subagent_depth < 0) max_subagent_depth = 0;
+                    if (max_subagent_depth > 5) max_subagent_depth = 5;
+                    if (max_subagent_depth > 0) enable_subagents = true;
+                } catch (...) {
+                    fprintf(stderr, "Invalid --max-subagent-depth value: %s\n", argv[i + 1]);
+                    return 1;
+                }
+                for (int j = i; j < argc - 2; j++) {
+                    argv[j] = argv[j + 2];
+                }
+                argc -= 2;
+                i--;
+            } else {
+                fprintf(stderr, "--max-subagent-depth requires a value (0-5)\n");
+                return 1;
+            }
+        } else if (arg == "--subagent-own-slot") {
+            subagent_own_slot = true;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
         }
     }
 
@@ -908,9 +955,15 @@ int main(int argc, char ** argv) {
     config.enable_agents_md = enable_agents_md;
     config.agents_md_prompt_section = resources.agents_md_prompt_section();
     config.compaction.enabled = enable_compaction;
+    config.subagents_enabled = enable_subagents;
+    config.max_subagent_depth = max_subagent_depth;
+    config.subagent_own_slot = subagent_own_slot;
     if (use_http_backend && inf.is_llama_server && inf.total_slots == 1) {
         config.inference_id_slot = 0;
     }
+
+    // Subagent display: max nesting depth (also gates the task tool's depth check)
+    subagent_display::instance().set_max_depth(max_subagent_depth);
 
     // Session persistence
     session_file sf;
@@ -1010,6 +1063,12 @@ int main(int argc, char ** argv) {
 
     // Resolve initial prompt from -p/--prompt flag or stdin
     std::string initial_prompt;
+    if (!is_stdin_terminal()) {
+        // Non-interactive stdin (pipe or /dev/null): always single-turn mode,
+        // because after the first turn stdin is at EOF and interactive input
+        // would spin forever redrawing the prompt.
+        params.single_turn = true;
+    }
     if (!params.prompt.empty()) {
         initial_prompt = params.prompt;
         params.prompt.clear();  // Only use once
@@ -1019,9 +1078,6 @@ int main(int argc, char ** argv) {
         while (!initial_prompt.empty() && (initial_prompt.back() == '\n' || initial_prompt.back() == '\r')) {
             initial_prompt.pop_back();
         }
-        // When reading from stdin pipe, always use single-turn mode
-        // (stdin is at EOF, so interactive input would spin forever)
-        params.single_turn = true;
     }
 
     // Non-interactive mode: if we have a prompt and single_turn, skip the help text
@@ -1054,6 +1110,14 @@ int main(int argc, char ** argv) {
             ss << "  Cached tokens:  " << stats.total_cached << "\n";
         }
         ss << "  Total tokens:   " << (stats.total_input + stats.total_output) << "\n";
+        if (stats.subagent_count > 0) {
+            ss << "  Subagents:      " << stats.subagent_count << " run(s)\n";
+            ss << "    Subagent prompt:  " << stats.subagent_input << "\n";
+            ss << "    Subagent output:  " << stats.subagent_output << "\n";
+            if (stats.subagent_cached > 0) {
+                ss << "    Subagent cached:  " << stats.subagent_cached << "\n";
+            }
+        }
         if (stats.total_prompt_ms > 0) {
             ss.setf(std::ios::fixed);
             ss.precision(2);
