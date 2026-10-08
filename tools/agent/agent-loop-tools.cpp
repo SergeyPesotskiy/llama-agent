@@ -1,4 +1,5 @@
 #include "agent-loop.h"
+#include "utf8-sanitize.h"
 
 #include <filesystem>
 #include <functional>
@@ -19,12 +20,18 @@ tool_result agent_loop::execute_tool_call_async(
         return {false, "", "Unknown tool: " + call.name};
     }
 
-    // Parse arguments
+    // Parse arguments (retry after UTF-8 sanitize: the model may echo legacy
+    // encoding bytes it saw in tool output into the argument string)
     json args;
     try {
         args = json::parse(call.arguments);
     } catch (const json::parse_error & e) {
-        return {false, "", std::string("Invalid JSON arguments: ") + e.what()};
+        auto san = utf8_sanitize(call.arguments);
+        try {
+            args = json::parse(san.text);
+        } catch (const json::parse_error & e2) {
+            return {false, "", std::string("Invalid JSON arguments: ") + e2.what()};
+        }
     }
 
     // Determine permission type
