@@ -45,6 +45,12 @@ std::string subagent_runner::build_system_prompt(subagent_type type) const {
         prompt << tool;
         first = false;
     }
+    // This subagent runs at depth parent+1; it may nest further while
+    // (parent_depth + 1) < max_depth, in which case the task tool is added
+    // to its tool list as well.
+    if (parent_tool_ctx_.subagent_depth + 1 < parent_config_.max_subagent_depth) {
+        prompt << ", task";
+    }
     prompt << "\n\n";
 
     // Add behavior guidelines based on type

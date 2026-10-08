@@ -12,6 +12,15 @@ inference_result agent_loop::generate_completion_streaming(
     std::vector<common_chat_tool> chat_tools;
     if (!allowed_tools_.empty()) {
         chat_tools = tool_registry::instance().to_chat_tools_filtered(allowed_tools_);
+        // If nesting is still allowed (depth < max), expose the task tool to
+        // subagents as well so they can spawn their own subagents.
+        if (tool_ctx_.subagents_enabled) {
+            for (const auto & t : tool_registry::instance().to_chat_tools()) {
+                if (t.name == "task") {
+                    chat_tools.push_back(t);
+                }
+            }
+        }
     } else if (!config_.subagents_enabled) {
         for (const auto & t : tool_registry::instance().to_chat_tools()) {
             if (t.name != "task") {
