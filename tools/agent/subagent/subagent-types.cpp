@@ -9,6 +9,22 @@
 #define ANSI_YELLOW  "\x1b[33m"
 #define ANSI_GREEN   "\x1b[32m"
 
+#ifdef _WIN32
+// cmd.exe equivalents of the Unix read-only commands (the model is usually
+// trained on bash idioms; without dir/findstr/where every useful command is
+// rejected by the read-only filter and the subagent loops).
+static const std::vector<std::string> k_explore_bash_patterns = {
+    "dir", "type ", "findstr ", "where ", "timeout ", "echo ", "ver",
+    "git status", "git log", "git diff", "git branch", "git show",
+};
+#else
+static const std::vector<std::string> k_explore_bash_patterns = {
+    "ls", "cat ", "head ", "tail ", "grep ", "find ", "file ", "wc ",
+    "git status", "git log", "git diff", "git branch", "git show",
+    "tree", "which ", "type ", "pwd",
+};
+#endif
+
 static const std::map<subagent_type, subagent_type_config> SUBAGENT_CONFIGS = {
     {subagent_type::EXPLORE, {
         "explore",
@@ -17,9 +33,7 @@ static const std::map<subagent_type, subagent_type_config> SUBAGENT_CONFIGS = {
         ANSI_CYAN,
         {"read", "glob", "bash"},
         // Allowed bash command prefixes for read-only exploration
-        {"ls", "cat ", "head ", "tail ", "grep ", "find ", "file ", "wc ",
-         "git status", "git log", "git diff", "git branch", "git show",
-         "tree", "which ", "type ", "pwd"},
+        k_explore_bash_patterns,
         false,  // can_write_files
         20      // max_iterations
     }},

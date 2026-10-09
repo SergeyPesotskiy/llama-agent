@@ -546,7 +546,11 @@ static bool should_stop() {
 
 static bool is_stdin_terminal() {
 #ifdef _WIN32
-    return _isatty(_fileno(stdin));
+    // isatty() returns true for NUL (GetFileType(NUL) == FILE_TYPE_CHAR), which
+    // would put scripted runs (`< NUL`) into interactive TUI mode and hang them.
+    // A real console accepts GetConsoleMode; NUL/pipe/redirect do not.
+    DWORD mode = 0;
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode) != 0;
 #else
     return isatty(fileno(stdin));
 #endif
@@ -583,7 +587,51 @@ static void signal_handler(int sig) {
 }
 #endif
 
+#ifdef _WIN32
+// The CRT converts the wide command line to narrow argv using the system ANSI
+// code page (e.g. cp1251), so non-Latin text (Cyrillic prompts, paths) gets
+// mangled. Re-parse GetCommandLineW() and rebuild argv as UTF-8.
+static void rebuild_argv_utf8(int & argc, char ** & argv,
+                              std::vector<std::string> & storage,
+                              std::vector<char *> & ptrs) {
+    LPWSTR * wargv = nullptr;
+    int n = 0;
+#ifdef __MINGW32__
+    // mingw-w64 declares a non-MSVC signature: LPWSTR* f(LPCWSTR, int*)
+    wargv = CommandLineToArgvW(GetCommandLineW(), &n);
+#else
+    n = CommandLineToArgvW(GetCommandLineW(), &wargv);
+#endif
+    if (n <= 0 || !wargv) {
+        return; // keep the CRT-provided argv as-is
+    }
+    storage.reserve(n);
+    for (int i = 0; i < n; i++) {
+        const int len = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, nullptr, 0, nullptr, nullptr);
+        std::string s(len > 0 ? len - 1 : 0, '\0');
+        if (len > 0) {
+            WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, &s[0], len, nullptr, nullptr);
+        }
+        storage.push_back(std::move(s));
+    }
+    LocalFree(wargv);
+
+    ptrs.clear();
+    for (auto & a : storage) {
+        ptrs.push_back(a.data());
+    }
+    argc = static_cast<int>(ptrs.size());
+    argv = ptrs.data();
+}
+#endif // _WIN32
+
 int main(int argc, char ** argv) {
+#ifdef _WIN32
+    std::vector<std::string> arg_storage;
+    std::vector<char *> arg_ptrs;
+    rebuild_argv_utf8(argc, argv, arg_storage, arg_ptrs);
+#endif
+
     common_params params;
 
     params.verbosity = LOG_LEVEL_ERROR;
