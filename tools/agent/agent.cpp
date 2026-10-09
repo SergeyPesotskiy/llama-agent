@@ -1,4 +1,5 @@
 #include "common.h"
+#include "build-info.h"
 #include "arg.h"
 #include "fit.h"
 #include "base64.hpp"
@@ -1059,7 +1060,9 @@ int main(int argc, char ** argv) {
     // Display startup info
     console::log("\n");
     console::log("%s\n", LLAMA_AGENT_LOGO);
-    console::log("build      : %s\n", inf.build_info.c_str());
+    // The agent's own build (b<number>-<commit>). inf.build_info is only populated
+    // for the local backend (embedded server); with --backend http it stays empty.
+    console::log("build      : %s\n", llama_build_info());
     console::log("model      : %s\n", inf.model_name.c_str());
     console::log("backend    : %s\n", use_http_backend ? "http" : "local");
     if (use_http_backend) {
