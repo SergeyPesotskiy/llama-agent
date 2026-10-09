@@ -26,6 +26,15 @@ subagent_runner::~subagent_runner() {
     // called without an active exception", benchmark D1 crash). The thread's
     // lambda already removes its output buffer on completion, so no extra
     // cleanup is needed here.
+    //
+    // First raise the shared interrupt flag: a leftover subagent may be blocked
+    // in a tool call (e.g. a shell command with a long timeout) or streaming an
+    // LLM response; both paths poll this flag, so the join below cannot stall
+    // the whole process exit (observed on Windows: agent exited while a
+    // background task was still running and ~subagent_runner blocked forever).
+    if (parent_tool_ctx_.is_interrupted) {
+        parent_tool_ctx_.is_interrupted->store(true);
+    }
     for (auto & [id, task] : tasks_) {
         if (task->thread.joinable()) {
             task->thread.join();
@@ -72,6 +81,21 @@ std::string subagent_runner::build_system_prompt(subagent_type type) const {
     // Add behavior guidelines based on type
     switch (type) {
         case subagent_type::EXPLORE:
+#ifdef _WIN32
+            prompt << R"(# Guidelines
+
+You are in READ-ONLY mode. Your task is to explore and understand the codebase.
+
+- Use `glob` to find files matching patterns
+- Use `read` to examine file contents
+- Use `bash` ONLY for read-only cmd.exe commands: dir, type, findstr, where, timeout /t N, echo, git status, git log, git diff
+  (the shell is cmd.exe, not bash: no ls/cat/grep/sleep, chain with & not ;)
+- DO NOT modify any files
+- DO NOT run destructive commands
+
+Be thorough but efficient. Report what you find clearly.
+)";
+#else
             prompt << R"(# Guidelines
 
 You are in READ-ONLY mode. Your task is to explore and understand the codebase.
@@ -84,6 +108,7 @@ You are in READ-ONLY mode. Your task is to explore and understand the codebase.
 
 Be thorough but efficient. Report what you find clearly.
 )";
+#endif
             break;
 
         case subagent_type::PLAN:
