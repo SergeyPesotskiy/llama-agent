@@ -16,6 +16,7 @@
 #include "terminal-image.h"
 #include "tui-renderer.h"
 #include "tool-registry.h"
+#include "tools/tool-task.h"
 #include "subagent/subagent-display.h"
 #include "permission.h"
 #include "log.h"
@@ -1633,6 +1634,10 @@ int main(int argc, char ** argv) {
         console::log("%s", stats_text(agent.get_stats()).c_str());
     }
     console::log("\nExiting...\n");
+
+    // Join leftover background subagent threads while the parent's backend and
+    // stats are still alive (P2: at static destruction they would be dangling).
+    subagent_shutdown_runners();
 
 #ifndef _WIN32
     // Shutdown MCP servers
