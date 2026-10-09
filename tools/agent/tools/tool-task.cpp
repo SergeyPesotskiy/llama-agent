@@ -1,4 +1,5 @@
 #include "tool-registry.h"
+#include "tool-task.h"
 #include "subagent/subagent-types.h"
 #include "subagent/subagent-display.h"
 #include "subagent/subagent-runner.h"
@@ -36,6 +37,16 @@ static subagent_runner & get_runner(const tool_context & ctx) {
         g_runners[key] = std::move(runner);
     }
     return *g_runners[key];
+}
+
+void subagent_shutdown_runners() {
+    // ~subagent_runner raises the shared interrupt flag and joins leftover
+    // background threads. Doing it here (still inside main) keeps the parent's
+    // backend_/stats_ alive for any thread that is mid-call; at static
+    // destruction time those would already be dangling (P2).
+    std::lock_guard<std::mutex> lock(g_runner_mutex);
+    g_runners.clear();
+    g_task_to_runner.clear();
 }
 
 // Note: token stats are accumulated into the parent's session_stats by the
