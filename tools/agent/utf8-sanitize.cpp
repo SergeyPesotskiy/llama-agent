@@ -298,3 +298,16 @@ utf8_sanitize_result utf8_sanitize(const std::string & s) {
     res.encoding = kCandidates[best].name;
     return res;
 }
+
+size_t utf8_safe_cut(const std::string & s, size_t pos) {
+    // Advance past continuation bytes (10xxxxxx) so the cut lands on a codepoint
+    // boundary; a UTF-8 sequence is at most 4 bytes, so 3 steps suffice.
+    if (pos == 0 || pos >= s.size()) {
+        return pos;
+    }
+    size_t limit = pos + 3 < s.size() ? pos + 3 : s.size();
+    while (pos < limit && ((unsigned char) s[pos] & 0xC0) == 0x80) {
+        pos++;
+    }
+    return pos;
+}
