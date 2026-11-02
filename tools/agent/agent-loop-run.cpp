@@ -1,4 +1,5 @@
 #include "agent-loop.h"
+#include <cstdlib>
 #include "subagent/subagent-limits.h"
 #include "tool-parallel.h"
 #include "console.h"
@@ -107,7 +108,20 @@ agent_loop_result agent_loop::run(const json & user_content) {
                                  should_batch_task_calls(parsed.tool_calls);
         if (batch_tasks) {
             std::vector<tool_result> results(parsed.tool_calls.size());
-            parallel_job_runner task_pool(4);
+            // Concurrency cap is tunable for A/B measurement: with 1 the batch
+            // degrades to sequential execution (same code path, no threads race).
+            int max_parallel = 4;
+            if (const char * env = getenv("LLAMA_AGENT_MAX_PARALLEL_TASKS")) {
+                int v = atoi(env);
+                if (v < 1) {
+                    v = 1;
+                }
+                if (v > 4) {
+                    v = 4;
+                }
+                max_parallel = v;
+            }
+            parallel_job_runner task_pool(max_parallel);
             bool cancelled_mid = false;
 
             for (size_t ci = 0; ci < parsed.tool_calls.size(); ci++) {
