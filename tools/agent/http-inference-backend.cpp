@@ -12,7 +12,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <functional>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 static std::string trim_trailing_slashes(std::string path) {
@@ -32,6 +35,36 @@ static std::string join_path(const std::string & base, const std::string & suffi
         return suffix;
     }
     return base + suffix;
+}
+
+bool agent_http_should_retry(int status, bool conn_error, bool got_content) {
+    // Never replay a stream that already produced deltas: the caller has seen
+    // partial output and a retry would duplicate it.
+    if (got_content) {
+        return false;
+    }
+    if (conn_error) {
+        return true;
+    }
+    return status == 429 || (status >= 500 && status <= 599);
+}
+
+// Max retry attempts for transient failures (connection errors, 429, 5xx).
+// Override with LLAMA_AGENT_HTTP_RETRIES (default 2, capped at 5).
+static int http_backend_max_retries() {
+    static const int max_retries = []() {
+        const char * env = std::getenv("LLAMA_AGENT_HTTP_RETRIES");
+        int n = 2;
+        if (env) {
+            char * end = nullptr;
+            long parsed = std::strtol(env, &end, 10);
+            if (end != env) {
+                n = (int) parsed;
+            }
+        }
+        return std::max(0, std::min(n, 5));
+    }();
+    return max_retries;
 }
 
 static httplib::Headers make_headers(const http_inference_backend_config & config) {
@@ -177,6 +210,56 @@ std::string http_inference_backend::props_path() const {
         base.resize(base.size() - 3);
     }
     return join_path(base, "/props");
+}
+
+std::string http_inference_backend::tokenize_path() const {
+    auto parts = common_http_parse_url(config_.base_url);
+    std::string base = trim_trailing_slashes(parts.path);
+    if (ends_with(base, "/v1")) {
+        base.resize(base.size() - 3);
+    }
+    return join_path(base, "/tokenize");
+}
+
+int http_inference_backend::count_tokens(const std::string & text) {
+    const size_t text_hash = std::hash<std::string>{}(text);
+    {
+        std::lock_guard<std::mutex> lock(count_cache_mutex_);
+        if (count_cache_valid_ && count_cache_len_ == text.size() && count_cache_hash_ == text_hash) {
+            return count_cache_value_;
+        }
+    }
+
+    int count = -1;
+    try {
+        auto [cli, parts] = common_http_client(config_.base_url);
+        if (config_.timeout_ms > 0) {
+            cli.set_connection_timeout(std::chrono::milliseconds(config_.timeout_ms));
+            cli.set_read_timeout(std::chrono::milliseconds(config_.timeout_ms));
+        }
+
+        json body;
+        body["content"] = text;
+        body["add_special"] = false;
+
+        auto res = cli.Post(tokenize_path(), make_headers(config_), body.dump(), "application/json");
+        if (res && res->status >= 200 && res->status < 300) {
+            json out = json::parse(res->body);
+            if (out.contains("tokens") && out["tokens"].is_array()) {
+                count = (int) out["tokens"].size();
+            }
+        }
+    } catch (const std::exception & e) {
+        LOG_DBG("HTTP inference /tokenize failed: %s\n", e.what());
+        count = -1;
+    }
+
+    std::lock_guard<std::mutex> lock(count_cache_mutex_);
+    count_cache_len_ = text.size();
+    count_cache_hash_ = text_hash;
+    count_cache_value_ = count;
+    count_cache_valid_ = true;
+    return count;
 }
 
 void http_inference_backend::fetch_props() {
@@ -439,65 +522,96 @@ inference_result http_inference_backend::complete(
     std::string reasoning;
     std::vector<common_chat_tool_call> native_tool_calls;
 
-    try {
-        auto [cli, parts] = common_http_client(config_.base_url);
-        if (config_.timeout_ms > 0) {
-            cli.set_connection_timeout(std::chrono::milliseconds(config_.timeout_ms));
-            cli.set_read_timeout(std::chrono::milliseconds(config_.timeout_ms));
-        }
+    const int max_retries = http_backend_max_retries();
+    // Backoff before retry attempt N (0-based): 1s, then 3s.
+    static const int retry_backoff_ms[] = {1000, 3000};
 
-        auto receiver = [&](const char * data, size_t data_length) {
-            if (stop()) {
-                result.cancelled = true;
-                return false;
+    for (int attempt = 0;; attempt++) {
+        response_buffer.clear();
+        content.clear();
+        reasoning.clear();
+        native_tool_calls.clear();
+        result = inference_result();
+
+        int status = 0;
+        bool conn_error = false;
+
+        try {
+            auto [cli, parts] = common_http_client(config_.base_url);
+            if (config_.timeout_ms > 0) {
+                cli.set_connection_timeout(std::chrono::milliseconds(config_.timeout_ms));
+                cli.set_read_timeout(std::chrono::milliseconds(config_.timeout_ms));
             }
-            response_buffer.append(data, data_length);
-            process_sse_buffer(response_buffer, [&](const std::string & payload) {
-                process_sse_payload(payload, request, result, content, reasoning, native_tool_calls, emit);
-            });
-            return !stop();
-        };
 
-        auto res = cli.Post(
-            chat_completions_path(),
-            make_headers(config_),
-            body.dump(),
-            "application/json",
-            receiver);
-
-        if (!response_buffer.empty()) {
-            process_sse_buffer(response_buffer, [&](const std::string & payload) {
-                process_sse_payload(payload, request, result, content, reasoning, native_tool_calls, emit);
-            });
-        }
-
-        if (!res) {
-            if (!result.cancelled) {
-                result.error = httplib::to_string(res.error());
-                emit({inference_event_type::ERROR, {}, {}, result.error, {}});
-            }
-        } else if (res->status < 200 || res->status >= 300) {
-            result.error = response_buffer.empty() ? res->body : response_buffer;
-            if (result.error.empty()) {
-                result.error = "HTTP inference request failed with status " + std::to_string(res->status);
-            }
-            // Context overflow is reported as HTTP 400 with a JSON error body. Parse
-            // it so compaction-on-overflow recovery still fires on the HTTP backend.
-            try {
-                json body_json = json::parse(result.error);
-                if (body_json.contains("error") && body_json["error"].is_object() &&
-                    body_json["error"].value("type", "") == "exceed_context_size_error") {
-                    result.context_overflow = true;
-                    result.prompt_tokens = body_json["error"].value("n_prompt_tokens", result.prompt_tokens);
+            auto receiver = [&](const char * data, size_t data_length) {
+                if (stop()) {
+                    result.cancelled = true;
+                    return false;
                 }
-            } catch (...) {
-                // not JSON, leave as a plain error
+                response_buffer.append(data, data_length);
+                process_sse_buffer(response_buffer, [&](const std::string & payload) {
+                    process_sse_payload(payload, request, result, content, reasoning, native_tool_calls, emit);
+                });
+                return !stop();
+            };
+
+            auto res = cli.Post(
+                chat_completions_path(),
+                make_headers(config_),
+                body.dump(),
+                "application/json",
+                receiver);
+
+            if (!response_buffer.empty()) {
+                process_sse_buffer(response_buffer, [&](const std::string & payload) {
+                    process_sse_payload(payload, request, result, content, reasoning, native_tool_calls, emit);
+                });
             }
+
+            if (!res) {
+                if (!result.cancelled) {
+                    conn_error = true;
+                    result.error = httplib::to_string(res.error());
+                }
+            } else if (res->status < 200 || res->status >= 300) {
+                status = res->status;
+                result.error = response_buffer.empty() ? res->body : response_buffer;
+                if (result.error.empty()) {
+                    result.error = "HTTP inference request failed with status " + std::to_string(res->status);
+                }
+                // Context overflow is reported as HTTP 400 with a JSON error body. Parse
+                // it so compaction-on-overflow recovery still fires on the HTTP backend.
+                try {
+                    json body_json = json::parse(result.error);
+                    if (body_json.contains("error") && body_json["error"].is_object() &&
+                        body_json["error"].value("type", "") == "exceed_context_size_error") {
+                        result.context_overflow = true;
+                        result.prompt_tokens = body_json["error"].value("n_prompt_tokens", result.prompt_tokens);
+                    }
+                } catch (...) {
+                    // not JSON, leave as a plain error
+                }
+            }
+        } catch (const std::exception & e) {
+            conn_error = true;
+            result.error = e.what();
+        }
+
+        const bool got_content = !content.empty() || !reasoning.empty() || !native_tool_calls.empty();
+        if (attempt < max_retries && !result.cancelled &&
+            agent_http_should_retry(status, conn_error, got_content)) {
+            LOG_DBG("HTTP inference attempt %d failed (%s), retrying\n", attempt + 1, result.error.c_str());
+            result.error.clear();
+            size_t backoff_idx = std::min((size_t) attempt, sizeof(retry_backoff_ms) / sizeof(retry_backoff_ms[0]) - 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(retry_backoff_ms[backoff_idx]));
+            continue;
+        }
+
+        // Final attempt (or no retry needed): surface the error to the caller.
+        if (!result.error.empty() && !(conn_error && result.cancelled)) {
             emit({inference_event_type::ERROR, {}, {}, result.error, {}});
         }
-    } catch (const std::exception & e) {
-        result.error = e.what();
-        emit({inference_event_type::ERROR, {}, {}, result.error, {}});
+        break;
     }
 
     if (request.parse_tool_calls) {

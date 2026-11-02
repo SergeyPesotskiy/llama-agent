@@ -93,7 +93,12 @@ bool agent_loop::compact() {
 }
 
 bool agent_loop::do_compact(int32_t effective_keep) {
-    size_t cut_idx = compaction_find_cut_point(messages_, effective_keep);
+    // Prefer exact token counts from the backend (HTTP backend: llama-server
+    // /tokenize); falls back to the chars/4 heuristic when unsupported (-1).
+    compaction_tokenizer tokenizer = [this](const std::string & text) {
+        return backend_.count_tokens(text);
+    };
+    size_t cut_idx = compaction_find_cut_point(messages_, effective_keep, tokenizer);
     if (cut_idx <= 1) {
         return false; // nothing to summarize (only system prompt before cut)
     }

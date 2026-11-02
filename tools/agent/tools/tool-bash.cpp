@@ -1,4 +1,5 @@
 #include "../tool-registry.h"
+#include "../utf8-sanitize.h"
 
 #include <array>
 #include <atomic>
@@ -127,7 +128,7 @@ static tool_result bash_execute(const json & args, const tool_context & ctx) {
             output.append(buffer, bytesRead);
             // Rolling tail: keep only the last MAX_COLLECT_LENGTH bytes
             if (output.size() > MAX_COLLECT_LENGTH) {
-                output.erase(0, output.size() - MAX_OUTPUT_LENGTH);
+                output.erase(0, utf8_safe_cut(output, output.size() - MAX_OUTPUT_LENGTH));
             }
         }
     }
@@ -202,7 +203,7 @@ static tool_result bash_execute(const json & args, const tool_context & ctx) {
             output.append(buffer, n);
             // Rolling tail: keep only the last MAX_COLLECT_LENGTH bytes
             if (output.size() > MAX_COLLECT_LENGTH) {
-                output.erase(0, output.size() - MAX_OUTPUT_LENGTH);
+                output.erase(0, utf8_safe_cut(output, output.size() - MAX_OUTPUT_LENGTH));
             }
         } else if (n == 0) {
             // EOF
@@ -218,7 +219,7 @@ static tool_result bash_execute(const json & args, const tool_context & ctx) {
                     total_bytes_seen += n;
                     output.append(buffer, n);
                     if (output.size() > MAX_COLLECT_LENGTH) {
-                        output.erase(0, output.size() - MAX_OUTPUT_LENGTH);
+                        output.erase(0, utf8_safe_cut(output, output.size() - MAX_OUTPUT_LENGTH));
                     }
                 }
                 exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
@@ -244,7 +245,9 @@ static tool_result bash_execute(const json & args, const tool_context & ctx) {
     // Tail-truncate raw output to MAX_OUTPUT_LENGTH, snapping to a line boundary
     bool output_was_truncated = (total_bytes_seen > MAX_OUTPUT_LENGTH);
     if (output.size() > MAX_OUTPUT_LENGTH) {
-        output = output.substr(output.size() - MAX_OUTPUT_LENGTH);
+        // Never cut mid-codepoint (utf8_safe_cut keeps the tail valid UTF-8; the
+        // line snap below only moves the cut further forward, onto a newline).
+        output = output.substr(utf8_safe_cut(output, output.size() - MAX_OUTPUT_LENGTH));
         // Snap to first newline to avoid a partial opening line
         size_t nl = output.find('\n');
         if (nl != std::string::npos && nl < 200) {
