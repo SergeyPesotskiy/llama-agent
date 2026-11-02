@@ -66,9 +66,17 @@ public:
     // Get count of active buffers
     size_t active_count() const;
 
+    // Full final result text, stored by the runner for every completed task
+    // (sync and background), keyed by task id. The parent receives only the
+    // capped version (subagent_cap_result); the full text stays retrievable
+    // here for resume / delta retrieval.
+    void store_full_result(const std::string & task_id, const std::string & text);
+    bool get_full_result(const std::string & task_id, std::string & out) const;
+
 private:
     subagent_output_manager() = default;
 
     mutable std::mutex buffers_mutex_;
     std::map<std::string, std::unique_ptr<subagent_output_buffer>> buffers_;
+    std::map<std::string, std::string> full_results_;
 };

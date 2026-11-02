@@ -1,4 +1,6 @@
 #include "agent-loop.h"
+#include "subagent/subagent-limits.h"
+#include "tool-parallel.h"
 #include "console.h"
 
 agent_loop_result agent_loop::run(const json & user_content) {
@@ -13,7 +15,7 @@ agent_loop_result agent_loop::run(const json & user_content) {
     if (session_file_) session_file_->append_message(messages_.back());
 
     while (config_.max_iterations <= 0 || result.iterations < config_.max_iterations) {
-        if (is_interrupted_.load()) {
+        if (interrupt_requested()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
             return result;
         }
@@ -49,8 +51,24 @@ agent_loop_result agent_loop::run(const json & user_content) {
             return result;
         }
 
-        if (parsed.content.empty() && parsed.tool_calls.empty() && is_interrupted_.load()) {
+        if (parsed.content.empty() && parsed.tool_calls.empty() && interrupt_requested()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
+            return result;
+        }
+
+        // Generated-token budget (task tool "max_tokens"): stop cleanly with a
+        // distinct reason and mark the final response (mirrors run_streaming).
+        if (subagent_should_stop_on_token_budget(stats_.total_output.load(),
+                                                 config_.max_generate_tokens)) {
+            if (!parsed.content.empty() || !parsed.tool_calls.empty()) {
+                json assistant_msg = build_assistant_msg(parsed, result.iterations);
+                messages_.push_back(assistant_msg);
+                if (session_file_) session_file_->append_message(assistant_msg);
+            }
+            result.stop_reason = agent_stop_reason::TOKEN_BUDGET_EXCEEDED;
+            result.final_response = parsed.content.empty()
+                ? std::string(SUBAGENT_TOKEN_BUDGET_NOTE)
+                : parsed.content + "\n" + SUBAGENT_TOKEN_BUDGET_NOTE;
             return result;
         }
 
@@ -80,9 +98,62 @@ agent_loop_result agent_loop::run(const json & user_content) {
 
         console::log("\n");
 
+        // Concurrent execution of multiple task calls in one assistant turn
+        // (only when subagents are enabled): `task` calls run on a worker pool
+        // capped at 4 threads, all other tools stay strictly sequential as
+        // before. Results are appended to the conversation in the ORIGINAL
+        // call order regardless of completion order.
+        const bool batch_tasks = tool_ctx_.subagents_enabled &&
+                                 should_batch_task_calls(parsed.tool_calls);
+        if (batch_tasks) {
+            std::vector<tool_result> results(parsed.tool_calls.size());
+            parallel_job_runner task_pool(4);
+            bool cancelled_mid = false;
+
+            for (size_t ci = 0; ci < parsed.tool_calls.size(); ci++) {
+                const auto & call = parsed.tool_calls[ci];
+                if (interrupt_requested()) {
+                    cancelled_mid = true;
+                    break;
+                }
+
+                if (call.name == "task") {
+                    // Permission prompts stay sequential on this thread; only
+                    // the (long) subagent run moves to a worker.
+                    prepared_tool_call prepared = prepare_tool_call(call);
+                    if (!prepared.proceed) {
+                        results[ci] = prepared.early;
+                        continue;
+                    }
+                    const common_chat_tool_call call_copy = call;
+                    json args = std::move(prepared.args);
+                    task_pool.enqueue([this, ci, call_copy, args, &results]() {
+                        results[ci] = run_prepared_tool_call(call_copy, args, true);
+                    });
+                } else {
+                    results[ci] = execute_tool_call(call);
+                }
+            }
+
+            task_pool.wait_all();
+
+            if (cancelled_mid) {
+                result.stop_reason = agent_stop_reason::USER_CANCELLED;
+                return result;
+            }
+
+            // Append results in the original call order
+            for (size_t ci = 0; ci < parsed.tool_calls.size(); ci++) {
+                const auto & call = parsed.tool_calls[ci];
+                std::string call_id = call.id.empty() ? ("call_" + std::to_string(result.iterations)) : call.id;
+                add_tool_result_message(call.name, call_id, results[ci]);
+            }
+            continue;
+        }
+
         // Execute each tool call
         for (const auto & call : parsed.tool_calls) {
-            if (is_interrupted_.load()) {
+            if (interrupt_requested()) {
                 result.stop_reason = agent_stop_reason::USER_CANCELLED;
                 return result;
             }

@@ -12,6 +12,8 @@ set(AGENT_CORE_SOURCES
     local-inference-backend.cpp
     session-file.cpp
     tool-registry.cpp
+    tool-output-guard.cpp
+    tool-parallel.cpp
     utf8-sanitize.cpp
     permission-policy.cpp
     permission.cpp
@@ -25,6 +27,7 @@ set(AGENT_CORE_SOURCES
     tools/tool-glob.cpp
     tools/tool-plan.cpp
     tools/tool-task.cpp
+    subagent/subagent-limits.cpp
     subagent/subagent-types.cpp
     subagent/subagent-display.cpp
     subagent/subagent-output.cpp
@@ -186,6 +189,17 @@ if(LLAMA_BUILD_TESTS)
     target_compile_features(test-agent-tool-parser PRIVATE cxx_std_17)
     target_include_directories(test-agent-tool-parser PRIVATE ../server)
     add_test(NAME agent-tool-parser COMMAND test-agent-tool-parser)
+
+    add_executable(test-agent-subagent-limits
+        test-subagent-limits.cpp
+        tool-output-guard.cpp
+        tool-parallel.cpp
+        subagent/subagent-limits.cpp
+    )
+    target_link_libraries(test-agent-subagent-limits PRIVATE llama-common ${CMAKE_THREAD_LIBS_INIT})
+    target_compile_features(test-agent-subagent-limits PRIVATE cxx_std_17)
+    target_include_directories(test-agent-subagent-limits PRIVATE ../server)
+    add_test(NAME agent-subagent-limits COMMAND test-agent-subagent-limits)
 
     add_executable(test-agent-inference-backend
         test-inference-backend.cpp

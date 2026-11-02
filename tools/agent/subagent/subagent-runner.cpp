@@ -10,6 +10,56 @@
 #include <random>
 #include <sstream>
 
+namespace {
+
+// Waits params.timeout_sec for the subagent to finish; if it is still running
+// when the deadline passes, raises the task-scoped interrupt flag with
+// SUBAGENT_STOP_TIMEOUT. stop() (or destruction, at the end of the run) ends
+// the wait early. Purely additive: with seconds <= 0 no thread is started.
+struct subagent_timeout_watchdog {
+    subagent_timeout_watchdog(std::atomic<bool> & flag, std::atomic<int> & reason, int seconds)
+        : flag_(flag), reason_(reason) {
+        if (seconds > 0) {
+            th_ = std::thread([this, seconds] {
+                std::unique_lock<std::mutex> lk(m_);
+                if (!cv_.wait_for(lk, std::chrono::seconds(seconds),
+                                  [this] { return done_.load(); })) {
+                    reason_.store(SUBAGENT_STOP_TIMEOUT);
+                    flag_.store(true);
+                }
+            });
+        }
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            done_.store(true);
+        }
+        cv_.notify_all();
+        if (th_.joinable()) {
+            th_.join();
+        }
+    }
+
+    ~subagent_timeout_watchdog() {
+        stop();
+    }
+
+    subagent_timeout_watchdog(const subagent_timeout_watchdog &) = delete;
+    subagent_timeout_watchdog & operator=(const subagent_timeout_watchdog &) = delete;
+
+private:
+    std::atomic<bool> & flag_;
+    std::atomic<int> & reason_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::atomic<bool> done_{false};
+    std::thread th_;
+};
+
+} // namespace
+
 subagent_runner::subagent_runner(const agent_config & parent_config,
                                   const tool_context & parent_tool_ctx)
     : parent_config_(parent_config)
@@ -175,8 +225,25 @@ subagent_result subagent_runner::run(const subagent_params & params) {
 }
 
 subagent_result subagent_runner::run_internal(const subagent_params & params,
-                                               subagent_output_buffer * buffer) {
+                                               subagent_output_buffer * buffer,
+                                               std::atomic<bool> * extra_interrupt,
+                                               std::atomic<int> * stop_reason,
+                                               const std::string & task_id) {
     subagent_result result;
+    result.task_id = task_id.empty() ? generate_task_id() : task_id;
+
+    // Per-run interrupt flag + reason code: owned by the caller for background
+    // tasks (so cancel()/watchdogs can reach them) or local to a synchronous
+    // run. The timeout watchdog raises both when params.timeout_sec elapses.
+    std::atomic<bool> local_interrupt{false};
+    std::atomic<int> local_reason{SUBAGENT_STOP_NONE};
+    std::atomic<bool> * interrupt = extra_interrupt ? extra_interrupt : &local_interrupt;
+    std::atomic<int> * reason = stop_reason ? stop_reason : &local_reason;
+    std::unique_ptr<subagent_timeout_watchdog> watchdog;
+    if (params.timeout_sec > 0) {
+        watchdog.reset(new subagent_timeout_watchdog(*interrupt, *reason, params.timeout_sec));
+    }
+
     const auto & type_config = get_subagent_config(params.type);
 
     // Start display scope
@@ -199,6 +266,7 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
     // Create subagent config with restricted iterations
     agent_config subagent_config = parent_config_;
     subagent_config.max_iterations = type_config.max_iterations;
+    subagent_config.max_generate_tokens = params.max_tokens;  // 0 = off
     subagent_config.verbose = false;  // Suppress verbose output in subagent
     subagent_config.enable_skills = false;  // No skills for subagents
     subagent_config.enable_agents_md = false;  // No agents.md for subagents
@@ -244,7 +312,8 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
     int new_depth = parent_tool_ctx_.subagent_depth + 1;
     std::vector<std::string> bash_patterns(type_config.bash_patterns.begin(), type_config.bash_patterns.end());
     agent_loop subagent(*subagent_backend, subagent_config, *parent_tool_ctx_.is_interrupted,
-                        type_config.allowed_tools, bash_patterns, system_prompt, new_depth, tool_callback);
+                        type_config.allowed_tools, bash_patterns, system_prompt, new_depth, tool_callback,
+                        interrupt);
 
     // Run via run_streaming (linked into both the TUI and agent-server binaries;
     // the plain run() helper only exists in the TUI target). Subagent console
@@ -315,6 +384,12 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
             result.error = "Reached maximum iterations (" + std::to_string(type_config.max_iterations) + ")";
             break;
 
+        case agent_stop_reason::TOKEN_BUDGET_EXCEEDED:
+            result.success = false;
+            result.output = loop_result.final_response;
+            result.error = "Token budget exhausted (max_tokens=" + std::to_string(params.max_tokens) + ")";
+            break;
+
         case agent_stop_reason::USER_CANCELLED:
             result.success = false;
             result.error = "User cancelled";
@@ -324,6 +399,30 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
             result.success = false;
             result.error = "Agent error: " + loop_result.final_response;
             break;
+    }
+
+    // Per-task stop status (cancel / timeout) vs parent-wide interrupt.
+    {
+        bool parent_int = parent_tool_ctx_.is_interrupted &&
+                          parent_tool_ctx_.is_interrupted->load();
+        result.status = subagent_stop_status(interrupt->load(), parent_int, reason->load());
+        if (result.status == "cancelled") {
+            result.success = false;
+            result.error = "Task cancelled";
+        } else if (result.status == "timeout") {
+            result.success = false;
+            result.error = "Task timed out";
+        }
+    }
+
+    // Keep the full output retrievable (resume task_id="..."); hand the parent
+    // a capped copy so one verbose subagent cannot blow up the parent context.
+    if (!result.output.empty()) {
+        {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            full_results_[result.task_id] = result.output;
+        }
+        result.output = subagent_cap_result(result.output, result.task_id);
     }
 
     return result;
@@ -347,7 +446,8 @@ std::string subagent_runner::start_background(const subagent_params & params) {
     task->thread = std::thread([this, task_ptr, params, buffer, task_id]() {
         subagent_result result;
         try {
-            result = this->run_internal(params, buffer);
+            result = this->run_internal(params, buffer, &task_ptr->cancelled,
+                                        &task_ptr->stop_reason, task_id);
         } catch (const std::exception & e) {
             result.success = false;
             result.error = std::string("Exception: ") + e.what();
@@ -358,6 +458,10 @@ std::string subagent_runner::start_background(const subagent_params & params) {
 
         task_ptr->promise.set_value(std::move(result));
         task_ptr->complete.store(true);
+        {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            done_cv_.notify_all();
+        }
 
         // Cleanup buffer
         subagent_output_manager::instance().remove_buffer(task_id);
@@ -390,46 +494,56 @@ bool subagent_runner::is_complete(const std::string & task_id) const {
 }
 
 subagent_result subagent_runner::get_result(const std::string & task_id) {
-    std::lock_guard<std::mutex> lock(tasks_mutex_);
-
-    // Check completed results first
-    auto completed_it = completed_results_.find(task_id);
-    if (completed_it != completed_results_.end()) {
-        return completed_it->second;
-    }
-
-    // Check active tasks
-    auto it = tasks_.find(task_id);
-    if (it == tasks_.end()) {
-        subagent_result empty;
-        empty.error = "Task not found: " + task_id;
-        return empty;
-    }
-
-    if (!it->second->complete.load()) {
-        subagent_result pending;
-        pending.error = "Task still running: " + task_id;
-        return pending;
-    }
-
-    // Get result and cleanup
+    std::thread orphan;
     subagent_result result;
-    try {
-        std::future<subagent_result> future = it->second->promise.get_future();
-        result = future.get();
-    } catch (const std::exception & e) {
-        result.success = false;
-        result.error = std::string("Failed to get result: ") + e.what();
+    {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+
+        // Check completed results first
+        auto completed_it = completed_results_.find(task_id);
+        if (completed_it != completed_results_.end()) {
+            return completed_it->second;
+        }
+
+        // Check active tasks
+        auto it = tasks_.find(task_id);
+        if (it == tasks_.end()) {
+            subagent_result empty;
+            empty.error = "Task not found: " + task_id;
+            return empty;
+        }
+
+        if (!it->second->complete.load()) {
+            subagent_result pending;
+            pending.error = "Task still running: " + task_id;
+            return pending;
+        }
+
+        // Get result (the worker already set the promise before signalling
+        // complete, so this cannot block while we hold tasks_mutex_)
+        try {
+            std::future<subagent_result> future = it->second->promise.get_future();
+            result = future.get();
+        } catch (const std::exception & e) {
+            result.success = false;
+            result.error = std::string("Failed to get result: ") + e.what();
+        }
+
+        // Move the thread handle out and join OUTSIDE the lock: joining under
+        // tasks_mutex_ blocked is_complete()/cancel() for every other task
+        // while a finishing subagent wound down.
+        if (it->second->thread.joinable()) {
+            orphan = std::move(it->second->thread);
+        }
+
+        // Store in completed results and remove from active
+        completed_results_[task_id] = result;
+        tasks_.erase(it);
     }
 
-    // Join thread
-    if (it->second->thread.joinable()) {
-        it->second->thread.join();
+    if (orphan.joinable()) {
+        orphan.join();
     }
-
-    // Store in completed results and remove from active
-    completed_results_[task_id] = result;
-    tasks_.erase(it);
 
     return result;
 }
@@ -439,9 +553,12 @@ void subagent_runner::cancel(const std::string & task_id) {
 
     auto it = tasks_.find(task_id);
     if (it != tasks_.end()) {
+        // Per-task interrupt: the subagent loop polls (parent || per-task)
+        // flags via agent_loop::interrupt_requested(), so this stops only the
+        // named task; the parent and sibling tasks keep running.
+        it->second->stop_reason.store(SUBAGENT_STOP_CANCEL);
         it->second->cancelled.store(true);
-        // Note: Actual cancellation depends on the agent loop checking the interrupted flag
-        // which is shared with the parent. For true cancellation, we'd need a per-task flag.
+        done_cv_.notify_all();
     }
 }
 
@@ -458,17 +575,59 @@ std::vector<std::string> subagent_runner::get_active_tasks() const {
 }
 
 void subagent_runner::cleanup_completed() {
-    std::lock_guard<std::mutex> lock(tasks_mutex_);
-
-    for (auto it = tasks_.begin(); it != tasks_.end(); ) {
-        if (it->second->complete.load()) {
-            // Join thread if joinable
-            if (it->second->thread.joinable()) {
-                it->second->thread.join();
+    std::vector<std::thread> done_threads;
+    {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+        for (auto it = tasks_.begin(); it != tasks_.end(); ) {
+            if (it->second->complete.load()) {
+                // Move out; join outside the lock (see get_result()).
+                if (it->second->thread.joinable()) {
+                    done_threads.push_back(std::move(it->second->thread));
+                }
+                it = tasks_.erase(it);
+            } else {
+                ++it;
             }
-            it = tasks_.erase(it);
-        } else {
-            ++it;
         }
     }
+    for (auto & th : done_threads) {
+        if (th.joinable()) {
+            th.join();
+        }
+    }
+}
+
+bool subagent_runner::wait_complete(const std::string & task_id, int wait_ms) {
+    std::unique_lock<std::mutex> lock(tasks_mutex_);
+    auto is_done = [&]() {
+        if (completed_results_.find(task_id) != completed_results_.end()) {
+            return true;  // collected earlier
+        }
+        auto it = tasks_.find(task_id);
+        if (it == tasks_.end()) {
+            return true;  // unknown task: let the caller report it immediately
+        }
+        return it->second->complete.load();
+    };
+    if (is_done() || wait_ms <= 0) {
+        return is_done();
+    }
+    return done_cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), is_done);
+}
+
+std::string subagent_runner::get_full_output(const std::string & task_id, size_t & total_out) {
+    std::lock_guard<std::mutex> lock(tasks_mutex_);
+    auto it = full_results_.find(task_id);
+    if (it == full_results_.end()) {
+        total_out = 0;
+        return std::string();
+    }
+    total_out = it->second.size();
+    size_t & off = last_resume_offset_[task_id];
+    if (off > total_out) {
+        off = total_out;
+    }
+    std::string out = it->second.substr(off);
+    off = total_out;  // subsequent calls only see output appended after this one
+    return out;
 }

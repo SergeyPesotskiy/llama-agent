@@ -163,3 +163,18 @@ size_t subagent_output_manager::active_count() const {
     std::lock_guard<std::mutex> lock(buffers_mutex_);
     return buffers_.size();
 }
+
+void subagent_output_manager::store_full_result(const std::string & task_id, const std::string & text) {
+    std::lock_guard<std::mutex> lock(buffers_mutex_);
+    full_results_[task_id] = text;
+}
+
+bool subagent_output_manager::get_full_result(const std::string & task_id, std::string & out) const {
+    std::lock_guard<std::mutex> lock(buffers_mutex_);
+    auto it = full_results_.find(task_id);
+    if (it == full_results_.end()) {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
