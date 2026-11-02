@@ -24,6 +24,7 @@ enum class agent_stop_reason {
     MAX_ITERATIONS,   // Hit iteration limit
     USER_CANCELLED,   // User interrupted
     AGENT_ERROR,      // Error occurred (not ERROR due to Windows macro conflict)
+    TOKEN_BUDGET_EXCEEDED, // max_generate_tokens budget exhausted (subagents)
 };
 
 // Configuration for the agent
@@ -53,6 +54,16 @@ struct agent_config {
     bool subagents_enabled = false;  // task tool available
     int max_subagent_depth = 0;      // 0 = disabled, 1-5 = nesting depth
     bool subagent_own_slot = false;  // subagents get their own server slot (needs --parallel >= 2)
+
+    // Generated-token budget for this loop. 0 = off. Set per subagent via the
+    // task tool's "max_tokens" parameter; when the loop's generated-token
+    // counter exceeds it, the loop stops with TOKEN_BUDGET_EXCEEDED.
+    int64_t max_generate_tokens = 0;
+
+    // Wrap tool results in <external_data untrusted="true"> tags and add the
+    // matching system-prompt line. Opt-in via --tool-output-guard (default off;
+    // off state is byte-identical to the historical prompt protocol).
+    bool tool_output_guard = false;
 };
 
 // Result from running the agent loop
@@ -196,6 +207,7 @@ struct agent_event {
             case agent_stop_reason::MAX_ITERATIONS: reason_str = "max_iterations"; break;
             case agent_stop_reason::USER_CANCELLED: reason_str = "user_cancelled"; break;
             case agent_stop_reason::AGENT_ERROR:    reason_str = "error"; break;
+            case agent_stop_reason::TOKEN_BUDGET_EXCEEDED: reason_str = "token_budget_exceeded"; break;
         }
         return {agent_event_type::COMPLETED, {
             {"reason", reason_str},
@@ -241,6 +253,8 @@ public:
     // allowed_tools empty = all tools; bash_patterns non-empty = read-only bash filtering.
     // subagent_depth is the nesting depth (parent's depth + 1). on_tool_call reports each
     // tool invocation to the parent for display. Shares the parent's inference backend.
+    // extra_interrupt: optional per-task interrupt flag (subagent cancel /
+    // timeout). The loop stops when (is_interrupted || *extra_interrupt).
     agent_loop(inference_backend & backend,
                const agent_config & config,
                std::atomic<bool> & is_interrupted,
@@ -248,7 +262,8 @@ public:
                const std::vector<std::string> & bash_patterns,
                const std::string & custom_system_prompt,
                int subagent_depth,
-               tool_call_callback on_tool_call);
+               tool_call_callback on_tool_call,
+               std::atomic<bool> * extra_interrupt = nullptr);
 
     // Run the agent loop with user content.
     // content can be a plain string or a JSON array of content blocks
@@ -317,6 +332,27 @@ private:
     // Build assistant message JSON from parsed completion
     json build_assistant_msg(const common_chat_msg & parsed, int iteration);
 
+    // Two-phase tool execution used by the concurrent task-call batch: the
+    // permission/prompt phase always runs sequentially on the loop thread,
+    // only the execution phase moves to worker threads.
+    struct prepared_tool_call {
+        bool proceed = false;   // false => return 'early' without executing
+        json args;              // parsed arguments (when proceed)
+        tool_result early;      // permission denial / parse error
+    };
+
+    prepared_tool_call prepare_tool_call_async(const common_chat_tool_call & call,
+                                               agent_event_callback on_event,
+                                               permission_manager_async & async_perms,
+                                               std::function<bool()> should_stop);
+    prepared_tool_call prepare_tool_call(const common_chat_tool_call & call);
+    tool_result run_prepared_tool_call(const common_chat_tool_call & call, const json & args,
+                                       bool quiet_display = false);
+
+    // True when an assistant turn requests >= 2 subagent runs (concurrent
+    // task-call batch); other tool calls keep running sequentially.
+    static bool should_batch_task_calls(const std::vector<common_chat_tool_call> & calls);
+
     // Accumulate timing stats from a completion
     void accumulate_stats(const inference_result & result);
 
@@ -329,6 +365,14 @@ private:
     inference_backend & backend_;
     agent_config config_;
     std::atomic<bool> & is_interrupted_;
+
+    // Per-task interrupt flag (subagent cancel/timeout); null for the main loop.
+    // Interruption is checked as (parent || extra) via interrupt_requested().
+    std::atomic<bool> * extra_interrupt_ = nullptr;
+
+    bool interrupt_requested() const {
+        return is_interrupted_.load() || (extra_interrupt_ && extra_interrupt_->load());
+    }
 
     json messages_;
     permission_manager permission_mgr_;

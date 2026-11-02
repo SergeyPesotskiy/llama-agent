@@ -14,13 +14,18 @@ static tool_result tool_error(std::string message) {
     return result;
 }
 
-tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
+// Permission/prompt phase of execute_tool_call (blocking console prompts run
+// on the loop thread only). The execution phase is factored out into
+// run_prepared_tool_call so the concurrent task batch can move it to a worker.
+agent_loop::prepared_tool_call agent_loop::prepare_tool_call(const common_chat_tool_call & call) {
+    prepared_tool_call p;
     auto & registry = tool_registry::instance();
 
     // Check if tool exists
     const tool_def * tool = registry.get_tool(call.name);
     if (!tool) {
-        return tool_error("Unknown tool: " + call.name);
+        p.early = tool_error("Unknown tool: " + call.name);
+        return p;
     }
 
     // Parse arguments (retry after UTF-8 sanitize: the model may echo legacy
@@ -33,9 +38,11 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
         try {
             args = json::parse(san.text);
         } catch (const json::parse_error & e2) {
-            return tool_error(std::string("Invalid JSON arguments: ") + e2.what());
+            p.early = tool_error(std::string("Invalid JSON arguments: ") + e2.what());
+            return p;
         }
     }
+    p.args = args;
 
     // Determine permission type
     permission_type ptype = permission_type::BASH;
@@ -70,7 +77,8 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
                 auto response = permission_mgr_.prompt_user(ext_req);
                 if (response == permission_response::DENY_ONCE ||
                     response == permission_response::DENY_ALWAYS) {
-                    return tool_error("Blocked: File is outside working directory");
+                    p.early = tool_error("Blocked: File is outside working directory");
+                    return p;
                 }
             }
         }
@@ -91,103 +99,42 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
         auto response = permission_mgr_.prompt_user(req);
         if (response == permission_response::DENY_ONCE ||
             response == permission_response::DENY_ALWAYS) {
-            return tool_error("Blocked: Detected repeated identical tool calls");
+            p.early = tool_error("Blocked: Detected repeated identical tool calls");
+            return p;
         }
     }
 
     // Check permission
     permission_state state = permission_mgr_.check_permission(req);
     if (state == permission_state::DENY || state == permission_state::DENY_SESSION) {
-        return tool_error("Permission denied for " + call.name);
+        p.early = tool_error("Permission denied for " + call.name);
+        return p;
     }
 
     if (state == permission_state::ASK) {
         auto response = permission_mgr_.prompt_user(req);
         if (response == permission_response::DENY_ONCE ||
             response == permission_response::DENY_ALWAYS) {
-            return tool_error("User denied permission for " + call.name);
+            p.early = tool_error("User denied permission for " + call.name);
+            return p;
         }
     }
 
     // Record this call
     permission_mgr_.record_tool_call(call.name, args_hash);
 
-    // Build a short argument summary for display / subagent reporting
-    std::string args_summary;
-    if (call.name == "bash") {
-        args_summary = args.value("command", "");
-    } else if (call.name == "read" || call.name == "write" || call.name == "edit") {
-        args_summary = args.value("path", args.value("file_path", ""));
-    } else {
-        args_summary = call.arguments;
-    }
-    if (args_summary.length() > 100) {
-        args_summary = args_summary.substr(0, 100) + "...";
-    }
+    p.proceed = true;
+    return p;
+}
 
-    // Display tool execution (main agent only; subagents report via on_tool_call_)
-    if (!is_subagent_) {
-        console::set_display(DISPLAY_TYPE_INFO);
-        console::log("\n› %s %s", call.name.c_str(), args_summary.c_str());
-        console::spinner::start();
-        console::set_display(DISPLAY_TYPE_RESET);
-    }
+// Execution + display phase. quiet_display suppresses the console header/result
+// echo (used for concurrently executed task calls; the subagent display
 
-    // Execute the tool with timing (subagents: filtered tool set + bash patterns)
-    auto start_time = std::chrono::steady_clock::now();
-    tool_result result = registry.execute_filtered(call.name, args, tool_ctx_, bash_patterns_);
-    auto end_time = std::chrono::steady_clock::now();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-
-    if (!is_subagent_) {
-        console::spinner::stop();
-        console::log("\n");
-    } else if (on_tool_call_) {
-        // Report this tool call to the parent display
-        on_tool_call_(call.name, args_summary, (int)elapsed_ms);
+// Sequential path: permission phase + execution phase, exactly as before.
+tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
+    prepared_tool_call p = prepare_tool_call(call);
+    if (!p.proceed) {
+        return p.early;
     }
-
-    // Display result summary (main agent only)
-    if (is_subagent_) {
-        return result;
-    }
-    if (result.success) {
-        // Truncate long output for display (unless the tool opted out for rich,
-        // pre-formatted output that must not be cut mid-escape/mid-codepoint).
-        std::string display_output = result.output;
-        if (!result.no_truncate_display && display_output.length() > 500) {
-            display_output = display_output.substr(0, 500) + "\n... (truncated)";
-        }
-        console::log("%s\n", display_output.c_str());
-        if (!result.image_bytes.empty()) {
-            render_image_to_terminal(result.image_bytes.data(), result.image_bytes.size(),
-                                     result.image_mime);
-        }
-    } else {
-        // Show output if available (e.g., bash stderr), plus error if set
-        if (!result.output.empty()) {
-            std::string display_output = result.output;
-            if (display_output.length() > 500) {
-                display_output = display_output.substr(0, 500) + "\n... (truncated)";
-            }
-            console::error("%s\n", display_output.c_str());
-        }
-        if (!result.error.empty()) {
-            console::error("Error: %s\n", result.error.c_str());
-        }
-        if (result.output.empty() && result.error.empty()) {
-            console::error("Error: Tool failed with no output\n");
-        }
-    }
-
-    // Display elapsed time
-    console::set_display(DISPLAY_TYPE_INFO);
-    if (elapsed_ms < 1000) {
-        console::log("└─ %lldms\n", (long long)elapsed_ms);
-    } else {
-        console::log("└─ %.1fs\n", elapsed_ms / 1000.0);
-    }
-    console::set_display(DISPLAY_TYPE_RESET);
-
-    return result;
+    return run_prepared_tool_call(call, p.args);
 }
