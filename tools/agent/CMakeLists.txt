@@ -51,6 +51,10 @@ endif()
 
 add_library(${AGENT_CORE_TARGET} STATIC ${AGENT_CORE_SOURCES})
 target_link_libraries(${AGENT_CORE_TARGET} PUBLIC server-context llama-common ${CMAKE_THREAD_LIBS_INIT})
+if(WIN32)
+    # CommandLineToArgvW (UTF-8 argv rebuild) lives in shell32
+    target_link_libraries(${AGENT_CORE_TARGET} PUBLIC shell32)
+endif()
 if(LLAMA_HTTPLIB)
     target_link_libraries(${AGENT_CORE_TARGET} PUBLIC cpp-httplib)
     target_compile_definitions(${AGENT_CORE_TARGET} PUBLIC LLAMA_AGENT_HAS_HTTP_BACKEND=1)

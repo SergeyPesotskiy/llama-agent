@@ -53,6 +53,7 @@
 #   define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #undef ERROR
 #include <io.h>
 #else
