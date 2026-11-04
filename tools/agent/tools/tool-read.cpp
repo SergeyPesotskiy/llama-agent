@@ -112,6 +112,8 @@ static tool_result read_execute(const json & args, const tool_context & ctx) {
     std::string raw((std::istreambuf_iterator<char>(file)),
                     std::istreambuf_iterator<char>());
 
+    // encoding fix (R3): decode UTF-8/UTF-16 with BOM and CP1251 files,
+    // normalize CRLF (Windows-authored files on any OS). See encoding-detect.h.
     auto d = enc::decode_text_bytes(raw);
     // "binary" content keeps behaving exactly as before: fall back to the raw
     // bytes (decode_text_bytes returns them unmodified in that case).
