@@ -68,6 +68,10 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
     std::string description = args.value("description", "");
     bool run_in_background = args.value("run_in_background", false);
     std::string resume_id = args.value("resume", "");
+    int timeout_sec = args.value("timeout", 0);
+    int64_t max_tokens = args.value("max_tokens", (int64_t) 0);
+    int wait_ms = args.value("wait_ms", 0);
+    bool want_full = args.value("full", false);
 
     // Check if we have the required context pointers
     if (!ctx.backend_ptr || !ctx.agent_config_ptr) {
@@ -78,13 +82,22 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
     if (!resume_id.empty()) {
         auto & runner = get_runner(ctx);
 
+        // Optional long-poll instead of busy-polling the task status.
+        if (wait_ms > 0) {
+            runner.wait_complete(resume_id, wait_ms > 30000 ? 30000 : wait_ms);
+        }
+
         if (runner.is_complete(resume_id)) {
             subagent_result result = runner.get_result(resume_id);
 
             // Format output
             std::ostringstream output;
             output << "Background task " << resume_id << " completed";
-            output << (result.success ? " successfully" : " with errors");
+            if (!result.status.empty() && result.status != "interrupted") {
+                output << " (status: " << result.status << ")";
+            } else {
+                output << (result.success ? " successfully" : " with errors");
+            }
             output << " in " << result.iterations << " iteration(s)\n";
 
             if (!result.tool_calls_summary.empty()) {
@@ -94,7 +107,14 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
                 }
             }
 
-            if (!result.output.empty()) {
+            if (want_full) {
+                // Uncapped stored output (delta since the previous full resume)
+                size_t total = 0;
+                std::string full = runner.get_full_output(resume_id, total);
+                output << "\nFull output (" << full.size() << " of " << total
+                       << " bytes" << (full.size() < total ? ", delta since last resume" : "") << "):\n";
+                output << (full.empty() ? std::string("(no output)") : full);
+            } else if (!result.output.empty()) {
                 output << "\nResult:\n" << result.output;
             }
 
@@ -137,6 +157,8 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
     task_params.type = type;
     task_params.prompt = prompt;
     task_params.description = description.empty() ? type_str + "-task" : description;
+    task_params.timeout_sec = timeout_sec > 0 ? timeout_sec : 0;
+    task_params.max_tokens = max_tokens > 0 ? max_tokens : 0;
 
     auto & runner = get_runner(ctx);
 
@@ -189,7 +211,11 @@ static tool_def task_tool = {
     "Background mode:\n"
     "- Set run_in_background=true to start the task without waiting\n"
     "- Returns a task_id that can be used with the resume parameter\n"
-    "- Call again with resume=\"task_id\" to check status or get results",
+    "- Call again with resume=\"task_id\" to check status or get results\n"
+    "- Optional timeout (seconds) and max_tokens (generated-token budget) bound a run;\n"
+    "  partial output is kept when either fires\n"
+    "- With resume: wait_ms long-polls up to N ms for completion (saves polling turns);\n"
+    "  full=true returns the uncapped stored output",
     R"json({
         "type": "object",
         "properties": {
@@ -215,6 +241,26 @@ static tool_def task_tool = {
             "resume": {
                 "type": "string",
                 "description": "Task ID to resume/check status. When provided, other parameters are ignored."
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Optional wall-clock timeout in seconds; on expiry the subagent is interrupted and partial output is kept (0/absent = none)",
+                "default": 0
+            },
+            "max_tokens": {
+                "type": "integer",
+                "description": "Optional budget on generated tokens for the subagent; on exhaustion it stops cleanly with a partial result (0/absent = unlimited)",
+                "default": 0
+            },
+            "wait_ms": {
+                "type": "integer",
+                "description": "With resume: wait up to this many milliseconds for completion before returning status (max 30000, default 0 = return immediately)",
+                "default": 0
+            },
+            "full": {
+                "type": "boolean",
+                "description": "With resume: return the complete stored output instead of the capped summary",
+                "default": false
             }
         },
         "required": []

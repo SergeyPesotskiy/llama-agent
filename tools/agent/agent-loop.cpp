@@ -1,5 +1,8 @@
 #include "agent-loop.h"
 #include "agent-loop-internal.h"
+#include "subagent/subagent-limits.h"
+#include "tool-output-guard.h"
+#include "tool-parallel.h"
 #include "utf8-sanitize.h"
 
 #include <chrono>
@@ -182,6 +185,11 @@ If a skill has `<allowed_tools>`, it declares which tools it needs. This helps y
         system_prompt += "Current date: " + std::string(date_buf) + "\n";
     }
 
+    // Tool output guard: one extra system-prompt line (flag off = no change)
+    if (config.tool_output_guard) {
+        system_prompt += tool_output_guard_system_line();
+    }
+
     // Store the full system prompt so subagents can reuse it as a prefix
     // (maximizes KV cache hits when parent and subagent share a server slot)
     tool_ctx_.base_system_prompt = system_prompt;
@@ -219,10 +227,12 @@ agent_loop::agent_loop(inference_backend & backend,
                        const std::vector<std::string> & bash_patterns,
                        const std::string & custom_system_prompt,
                        int subagent_depth,
-                       tool_call_callback on_tool_call)
+                       tool_call_callback on_tool_call,
+                       std::atomic<bool> * extra_interrupt)
     : backend_(backend)
     , config_(config)
     , is_interrupted_(is_interrupted)
+    , extra_interrupt_(extra_interrupt)
     , messages_(json::array())
     , allowed_tools_(allowed_tools)
     , bash_patterns_(bash_patterns)
@@ -350,6 +360,9 @@ void agent_loop::add_tool_result_message(const std::string & tool_name,
                 if (block.is_object() && block.contains("text") && block["text"].is_string()) {
                     auto san = utf8_sanitize(block["text"].get<std::string>());
                     block["text"] = std::move(san.text);
+                    // Tool output guard choke point (no-op when disabled)
+                    block["text"] = tool_output_guard_wrap(block["text"].get<std::string>(),
+                                                           config_.tool_output_guard);
                 }
             }
         }
@@ -375,6 +388,10 @@ void agent_loop::add_tool_result_message(const std::string & tool_name,
         } else {
             content = std::move(san.text);
         }
+        // Single choke point for the tool output guard: wraps every tool result
+        // string entering the message list. Identity when the flag is off, so
+        // messages stay byte-identical to the historical behavior.
+        content = tool_output_guard_wrap(content, config_.tool_output_guard);
         msg["content"] = std::move(content);
     }
 
@@ -424,6 +441,19 @@ void agent_loop::accumulate_stats(const inference_result & result) {
     }
 }
 
+bool agent_loop::should_batch_task_calls(const std::vector<common_chat_tool_call> & calls) {
+    if (calls.size() < 2) {
+        return false;
+    }
+    size_t task_calls = 0;
+    for (const auto & call : calls) {
+        if (call.name == "task") {
+            ++task_calls;
+        }
+    }
+    return task_calls >= 2;
+}
+
 // Streaming version of run() for API use
 agent_loop_result agent_loop::run_streaming(
     const json & user_content,
@@ -434,9 +464,10 @@ agent_loop_result agent_loop::run_streaming(
     agent_loop_result result;
     result.iterations = 0;
 
-    // Default should_stop to check is_interrupted_
+    // Default should_stop to check is_interrupted_ (plus the per-task
+    // interrupt flag when this loop is a cancellable subagent)
     if (!should_stop) {
-        should_stop = [this]() { return is_interrupted_.load(); };
+        should_stop = [this]() { return interrupt_requested(); };
     }
 
     // Add user message (content can be a string or an array of content blocks)
@@ -467,6 +498,24 @@ agent_loop_result agent_loop::run_streaming(
         // If the backend flagged cancellation, stop immediately (ESC during generation)
         if (completion.cancelled || should_stop()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
+            on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
+            return result;
+        }
+
+        // Generated-token budget (task tool "max_tokens"): stop cleanly with a
+        // distinct reason and mark the final response. max_generate_tokens is
+        // 0 (off) for the main agent, so this only fires in budgeted sub-loops.
+        if (subagent_should_stop_on_token_budget(stats_.total_output.load(),
+                                                 config_.max_generate_tokens)) {
+            if (!parsed.content.empty() || !parsed.tool_calls.empty()) {
+                json assistant_msg = build_assistant_msg(parsed, result.iterations);
+                messages_.push_back(assistant_msg);
+                if (session_file_) session_file_->append_message(assistant_msg);
+            }
+            result.stop_reason = agent_stop_reason::TOKEN_BUDGET_EXCEEDED;
+            result.final_response = parsed.content.empty()
+                ? std::string(SUBAGENT_TOKEN_BUDGET_NOTE)
+                : parsed.content + "\n" + SUBAGENT_TOKEN_BUDGET_NOTE;
             on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;
         }
@@ -511,6 +560,74 @@ agent_loop_result agent_loop::run_streaming(
             result.final_response = parsed.content;
             on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;
+        }
+
+        // Concurrent execution of multiple task calls in one assistant turn
+        // (only when subagents are enabled): `task` calls run on a worker pool
+        // capped at 4 threads, all other tools stay strictly sequential as
+        // before. Results are appended to the conversation in the ORIGINAL
+        // call order regardless of completion order.
+        const bool batch_tasks = async_perms && tool_ctx_.subagents_enabled &&
+                                 should_batch_task_calls(parsed.tool_calls);
+        if (batch_tasks) {
+            std::vector<tool_result> results(parsed.tool_calls.size());
+            std::vector<int64_t> elapsed_ms(parsed.tool_calls.size(), 0);
+            parallel_job_runner task_pool(4);
+            bool cancelled_mid = false;
+
+            for (size_t ci = 0; ci < parsed.tool_calls.size(); ci++) {
+                const auto & call = parsed.tool_calls[ci];
+                if (should_stop()) {
+                    cancelled_mid = true;
+                    break;
+                }
+                on_event(agent_event::tool_start(call.name, call.arguments));
+
+                if (call.name == "task") {
+                    // Permission phase stays sequential on this thread; only
+                    // the (long) subagent run moves to a worker.
+                    prepared_tool_call prepared =
+                        prepare_tool_call_async(call, on_event, *async_perms, should_stop);
+                    if (!prepared.proceed) {
+                        results[ci] = prepared.early;
+                        continue;
+                    }
+                    const common_chat_tool_call call_copy = call;
+                    json args = std::move(prepared.args);
+                    task_pool.enqueue([this, ci, call_copy, args, &results, &elapsed_ms]() {
+                        auto t0 = std::chrono::steady_clock::now();
+                        results[ci] = run_prepared_tool_call(call_copy, args);
+                        auto t1 = std::chrono::steady_clock::now();
+                        elapsed_ms[ci] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            t1 - t0).count();
+                    });
+                } else {
+                    auto t0 = std::chrono::steady_clock::now();
+                    results[ci] = execute_tool_call_async(call, on_event, *async_perms, should_stop);
+                    auto t1 = std::chrono::steady_clock::now();
+                    elapsed_ms[ci] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        t1 - t0).count();
+                }
+            }
+
+            task_pool.wait_all();
+
+            if (cancelled_mid) {
+                result.stop_reason = agent_stop_reason::USER_CANCELLED;
+                on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
+                return result;
+            }
+
+            // Emit + append results in the original call order
+            for (size_t ci = 0; ci < parsed.tool_calls.size(); ci++) {
+                const auto & call = parsed.tool_calls[ci];
+                on_event(agent_event::tool_result(call.name, results[ci].success,
+                                                  results[ci].output, elapsed_ms[ci],
+                                                  results[ci].error, results[ci].no_truncate_display));
+                std::string call_id = call.id.empty() ? ("call_" + std::to_string(result.iterations)) : call.id;
+                add_tool_result_message(call.name, call_id, results[ci]);
+            }
+            continue;
         }
 
         // Execute each tool call
