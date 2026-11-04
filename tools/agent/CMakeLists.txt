@@ -15,6 +15,7 @@ set(AGENT_CORE_SOURCES
     tool-output-guard.cpp
     tool-parallel.cpp
     utf8-sanitize.cpp
+    encoding-detect.cpp
     permission-policy.cpp
     permission.cpp
     permission-async.cpp
@@ -162,6 +163,9 @@ if(LLAMA_BUILD_TESTS)
     target_compile_features(test-agent-session-file PRIVATE cxx_std_17)
     target_include_directories(test-agent-session-file PRIVATE ../server)
     add_test(NAME agent-session-file COMMAND test-agent-session-file)
+    add_executable(test-agent-encoding test-encoding.cpp encoding-detect.cpp)
+    target_compile_features(test-agent-encoding PRIVATE cxx_std_17)
+    add_test(NAME agent-encoding COMMAND test-agent-encoding)
 
     add_executable(test-agent-resources
         test-resources.cpp
