@@ -1,3 +1,4 @@
+#include "../encoding-detect.h"
 #include "../tool-registry.h"
 #include "../utf8-sanitize.h"
 
@@ -254,6 +255,14 @@ static tool_result bash_execute(const json & args, const tool_context & ctx) {
             output = output.substr(nl + 1);
         }
     }
+
+#ifdef _WIN32
+    // Console output of cmd.exe children arrives in the OEM codepage (CP866 on
+    // ru-RU): convert to UTF-8 exactly once, after all raw-byte truncation
+    // above (rolling tail / utf8_safe_cut keep operating on raw bytes; valid
+    // UTF-8 passes through unchanged).
+    output = enc::decode_console_output(output);
+#endif
 
     // Then truncate to max lines (also keeps tail)
     std::string truncated_output = truncate_lines(output, MAX_OUTPUT_LINES);
