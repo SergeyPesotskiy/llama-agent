@@ -101,6 +101,13 @@ public:
         std::function<void(const inference_event &)> on_event,
         std::function<bool()> should_stop) = 0;
 
+    // Accurate token count for a text fragment. -1 = unknown / not supported;
+    // callers must fall back to a heuristic. Default impl keeps mocks compiling.
+    virtual int count_tokens(const std::string & text) {
+        (void) text;
+        return -1;
+    }
+
     // Clone for subagent use (--subagent-own-slot): returns a fresh backend that
     // will be routed to a free server slot (id_slot = -1). nullptr = not supported.
     virtual std::unique_ptr<inference_backend> clone_for_subagent() const { return nullptr; }

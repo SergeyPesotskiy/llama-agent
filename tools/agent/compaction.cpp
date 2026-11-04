@@ -1,6 +1,7 @@
 #include "compaction.h"
 
 #include <sstream>
+#include <vector>
 
 static const int TOOL_RESULT_MAX_CHARS = 2000;
 
@@ -24,7 +25,71 @@ static int32_t count_content_chars(const json & content) {
     return 0;
 }
 
-int32_t compaction_estimate_tokens(const json & msg) {
+// Collect the text fragments of a message's content plus a fixed image cost.
+// Image blocks are estimated at ~1200 tokens (4800 chars at chars/4 heuristic).
+static void collect_content_text(const json & content, std::vector<std::string> & parts, int32_t & image_tokens) {
+    if (content.is_string()) {
+        parts.push_back(content.get<std::string>());
+    } else if (content.is_array()) {
+        for (const auto & block : content) {
+            if (block.contains("type") && block["type"] == "image_url") {
+                image_tokens += 1200;  // ~1200 tokens per image
+            } else if (block.contains("text") && block["text"].is_string()) {
+                parts.push_back(block["text"].get<std::string>());
+            }
+        }
+    }
+}
+
+// Exact per-message count via tokenizer; -1 if any fragment cannot be counted.
+static int32_t estimate_tokens_exact(const json & msg, const compaction_tokenizer & tokenizer) {
+    std::vector<std::string> parts;
+    int32_t total = 0;
+
+    if (msg.contains("content")) {
+        int32_t image_tokens = 0;
+        collect_content_text(msg["content"], parts, image_tokens);
+        total += image_tokens;
+    }
+
+    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
+        parts.push_back(msg["reasoning_content"].get<std::string>());
+    }
+
+    // Count tool call names and arguments
+    if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
+        for (const auto & tc : msg["tool_calls"]) {
+            if (tc.contains("function")) {
+                const auto & fn = tc["function"];
+                if (fn.contains("name") && fn["name"].is_string()) {
+                    parts.push_back(fn["name"].get<std::string>());
+                }
+                if (fn.contains("arguments") && fn["arguments"].is_string()) {
+                    parts.push_back(fn["arguments"].get<std::string>());
+                }
+            }
+        }
+    }
+
+    for (const auto & part : parts) {
+        int n = tokenizer(part);
+        if (n < 0) {
+            return -1;
+        }
+        total += n;
+    }
+    return total;
+}
+
+int32_t compaction_estimate_tokens(const json & msg, const compaction_tokenizer & tokenizer) {
+    if (tokenizer) {
+        int32_t exact = estimate_tokens_exact(msg, tokenizer);
+        if (exact >= 0) {
+            return exact;
+        }
+        // tokenizer unavailable -> fall through to the chars/4 heuristic
+    }
+
     int32_t chars = 0;
 
     if (msg.contains("content")) {
@@ -53,15 +118,15 @@ int32_t compaction_estimate_tokens(const json & msg) {
     return (chars + 3) / 4;
 }
 
-int32_t compaction_estimate_total_tokens(const json & messages) {
+int32_t compaction_estimate_total_tokens(const json & messages, const compaction_tokenizer & tokenizer) {
     int32_t total = 0;
     for (const auto & m : messages) {
-        total += compaction_estimate_tokens(m);
+        total += compaction_estimate_tokens(m, tokenizer);
     }
     return total;
 }
 
-size_t compaction_find_cut_point(const json & messages, int32_t keep_recent_tokens) {
+size_t compaction_find_cut_point(const json & messages, int32_t keep_recent_tokens, const compaction_tokenizer & tokenizer) {
     if (messages.size() <= 2) {
         return 1; // only system + at most one message, nothing to cut
     }
@@ -95,7 +160,7 @@ size_t compaction_find_cut_point(const json & messages, int32_t keep_recent_toke
     size_t cut_idx = valid_cuts[0]; // fallback: keep everything
 
     for (size_t i = messages.size() - 1; i >= 1; i--) {
-        accumulated += compaction_estimate_tokens(messages[i]);
+        accumulated += compaction_estimate_tokens(messages[i], tokenizer);
         if (accumulated >= keep_recent_tokens) {
             // Find the first valid cut point >= i
             for (size_t c : valid_cuts) {
