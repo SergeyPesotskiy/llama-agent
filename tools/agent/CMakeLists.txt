@@ -269,5 +269,12 @@ if(LLAMA_BUILD_TESTS)
         target_compile_features(test-agent-http-inference-backend PRIVATE cxx_std_17)
         target_include_directories(test-agent-http-inference-backend PRIVATE ../server)
         add_test(NAME agent-http-inference-backend COMMAND test-agent-http-inference-backend)
+        add_executable(test-agent-subagent-backends
+            test-subagent-backends.cpp
+        )
+        target_link_libraries(test-agent-subagent-backends PRIVATE ${AGENT_CORE_TARGET} cpp-httplib)
+        target_compile_features(test-agent-subagent-backends PRIVATE cxx_std_17)
+        target_include_directories(test-agent-subagent-backends PRIVATE ../server)
+        add_test(NAME agent-subagent-backends COMMAND test-agent-subagent-backends)
     endif()
 endif()
