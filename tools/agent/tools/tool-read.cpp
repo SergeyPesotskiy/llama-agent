@@ -1,3 +1,4 @@
+#include "../encoding-detect.h"
 #include "../tool-registry.h"
 #include "../permission.h"
 
@@ -102,11 +103,20 @@ static tool_result read_execute(const json & args, const tool_context & ctx) {
         return result;
     }
 
-    // Open file
-    std::ifstream file(path);
+    // Read the whole file in binary and decode it: BOM sniffing (UTF-8/UTF-16),
+    // strict UTF-8 passthrough, CP1251 fallback, CRLF -> LF normalization.
+    std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         return {false, "", "Cannot open file: " + path.string()};
     }
+    std::string raw((std::istreambuf_iterator<char>(file)),
+                    std::istreambuf_iterator<char>());
+
+    auto d = enc::decode_text_bytes(raw);
+    // "binary" content keeps behaving exactly as before: fall back to the raw
+    // bytes (decode_text_bytes returns them unmodified in that case).
+    std::string text = (std::string(d.encoding) == "binary") ? raw : d.text;
+    std::istringstream stream(text);
 
     // Read lines
     std::vector<std::string> lines;
@@ -114,7 +124,7 @@ static tool_result read_execute(const json & args, const tool_context & ctx) {
     int line_num = 0;
     int total_lines = 0;
 
-    while (std::getline(file, line)) {
+    while (std::getline(stream, line)) {
         total_lines++;
         if (line_num >= offset && (int)lines.size() < limit) {
             // Truncate very long lines
