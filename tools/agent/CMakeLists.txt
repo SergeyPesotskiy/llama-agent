@@ -15,6 +15,7 @@ set(AGENT_CORE_SOURCES
     tool-output-guard.cpp
     tool-parallel.cpp
     utf8-sanitize.cpp
+    subagent-backends.cpp
     encoding-detect.cpp
     permission-policy.cpp
     permission.cpp

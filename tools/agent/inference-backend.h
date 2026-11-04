@@ -111,4 +111,11 @@ public:
     // Clone for subagent use (--subagent-own-slot): returns a fresh backend that
     // will be routed to a free server slot (id_slot = -1). nullptr = not supported.
     virtual std::unique_ptr<inference_backend> clone_for_subagent() const { return nullptr; }
+
+    // Clone bound to a different base URL (external endpoint, --subagent-backends).
+    // Overridden by http backends; nullptr = not supported / endpoint not reachable.
+    virtual std::unique_ptr<inference_backend> clone_with_base_url(const std::string & url) const {
+        (void) url;
+        return nullptr;
+    }
 };

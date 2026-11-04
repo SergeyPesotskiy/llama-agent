@@ -39,6 +39,10 @@ public:
 
     std::unique_ptr<inference_backend> clone_for_subagent() const override;
 
+    // Clone bound to another base URL; nullptr when the ctor throws or the endpoint
+    // probe (/props in ctor) did not confirm a llama-server -> treated as not alive.
+    std::unique_ptr<inference_backend> clone_with_base_url(const std::string & url) const override;
+
 private:
     void fetch_props();
 

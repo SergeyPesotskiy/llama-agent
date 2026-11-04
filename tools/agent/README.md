@@ -459,6 +459,7 @@ Delegate work to specialized subagents that run in their own context window. Rea
 | `--subagents` / `--no-subagents` | Enable/disable the feature (default: off) |
 | `--max-subagent-depth N` | Max nesting depth, 0–5 (default 1; 0 = main agent only) |
 | `--subagent-own-slot` | Give each subagent its own llama-server slot (requires `--parallel >= 2`) |
+| `--subagent-backends URL[,URL...]` | Repeatable; external inference backend pool for subagents (round-robin/auto; each URL probed via /props) |
 
 **Subagent types:** `explore` (read-only: read/glob/bash with restricted commands), `plan` (read/glob only), `general` (all tools except task), `bash` (shell only). A subagent may spawn further subagents while its depth is below the limit.
 

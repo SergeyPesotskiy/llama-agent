@@ -1,4 +1,5 @@
 #include "common.h"
+#include "subagent-backends.h"
 #include "build-info.h"
 #include "arg.h"
 #include "fit.h"
@@ -656,6 +657,7 @@ int main(int argc, char ** argv) {
     std::string backend_mode = "auto";
     std::string server_url;
     std::vector<std::string> extra_skills_paths;
+    std::vector<std::string> subagent_backends_list;  // --subagent-backends (repeatable)
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -721,6 +723,28 @@ int main(int argc, char ** argv) {
                 i--;
             } else {
                 fprintf(stderr, "--server-url requires a URL\n");
+                return 1;
+            }
+        } else if (arg == "--subagent-backends") {
+            if (i + 1 < argc) {
+                // Repeatable flag: values from all occurrences are concatenated
+                // (each value parsed/normalized via parse_backends_list, deduped).
+                for (const auto & url : subagent_backends::parse_backends_list(argv[i + 1])) {
+                    bool seen = false;
+                    for (const auto & have : subagent_backends_list) {
+                        if (have == url) { seen = true; break; }
+                    }
+                    if (!seen) {
+                        subagent_backends_list.push_back(url);
+                    }
+                }
+                for (int j = i; j < argc - 2; j++) {
+                    argv[j] = argv[j + 2];
+                }
+                argc -= 2;
+                i--;
+            } else {
+                fprintf(stderr, "--subagent-backends requires a value (comma-separated URLs)\n");
                 return 1;
             }
         } else if (arg == "--backend") {
@@ -1017,6 +1041,7 @@ int main(int argc, char ** argv) {
     config.subagents_enabled = enable_subagents;
     config.max_subagent_depth = max_subagent_depth;
     config.subagent_own_slot = subagent_own_slot;
+    config.subagent_backends = subagent_backends_list;
     config.tool_output_guard = tool_output_guard;
     if (use_http_backend && inf.is_llama_server && inf.total_slots == 1) {
         config.inference_id_slot = 0;
@@ -1077,6 +1102,9 @@ int main(int argc, char ** argv) {
     console::log("backend    : %s\n", use_http_backend ? "http" : "local");
     if (use_http_backend) {
         console::log("server url : %s\n", server_url.c_str());
+    }
+    for (size_t bi = 0; bi < config.subagent_backends.size(); bi++) {
+        console::log("subagent backend [%zu]: %s\n", bi, config.subagent_backends[bi].c_str());
     }
     console::log("working dir: %s\n", working_dir.c_str());
     if (yolo_mode) {

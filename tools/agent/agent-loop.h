@@ -55,6 +55,10 @@ struct agent_config {
     int max_subagent_depth = 0;      // 0 = disabled, 1-5 = nesting depth
     bool subagent_own_slot = false;  // subagents get their own server slot (needs --parallel >= 2)
 
+    // External inference backend pool for subagents (--subagent-backends),
+    // round-robin/auto. Normalized URLs (see subagent-backends.h).
+    std::vector<std::string> subagent_backends;
+
     // Generated-token budget for this loop. 0 = off. Set per subagent via the
     // task tool's "max_tokens" parameter; when the loop's generated-token
     // counter exceeds it, the loop stops with TOKEN_BUDGET_EXCEEDED.

@@ -194,6 +194,24 @@ std::unique_ptr<inference_backend> http_inference_backend::clone_for_subagent() 
     return std::make_unique<http_inference_backend>(std::move(cfg));
 }
 
+std::unique_ptr<inference_backend> http_inference_backend::clone_with_base_url(const std::string & url) const {
+    // Fresh backend bound to an external endpoint. Liveness: the constructor probes
+    // /props (fetch_props swallows errors and leaves meta_ unprobed). Return nullptr
+    // when construction throws or the probe did not confirm a llama-server.
+    try {
+        http_inference_backend_config cfg = config_;
+        cfg.base_url = url;
+        cfg.id_slot = -1;
+        auto clone = std::make_unique<http_inference_backend>(std::move(cfg));
+        if (!clone->meta().is_llama_server) {
+            return nullptr;
+        }
+        return clone;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 std::string http_inference_backend::chat_completions_path() const {
     auto parts = common_http_parse_url(config_.base_url);
     std::string base = trim_trailing_slashes(parts.path);
