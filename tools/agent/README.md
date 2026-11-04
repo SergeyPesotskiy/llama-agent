@@ -599,6 +599,14 @@ curl -X POST http://localhost:8081/v1/agent/session/sess_00000001/delete
 
 </details>
 
+## Text Encoding (bash and read tools)
+
+All tool output and file text is normalized to UTF-8 before it reaches the model (encoding-detect unit, see encoding-detect.h/cpp):
+
+- bash tool on Windows: console output of child processes is decoded from the OEM codepage (CP866 on ru-RU) to UTF-8; valid UTF-8 passes through unchanged.
+- read tool: files with a UTF-8 or UTF-16 BOM and CP1251 text are decoded to UTF-8, CRLF is normalized to LF; binary content is passed through unchanged.
+- Known limitation: UTF-16 without a BOM is not detected and may appear as binary.
+
 ## Acknowledgments
 
 Light harness inspired by [Pi](https://github.com/badlogic/pi-mono) by Mario Zechner.
