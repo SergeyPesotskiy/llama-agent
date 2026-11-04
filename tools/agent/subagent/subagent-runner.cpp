@@ -336,9 +336,13 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
             if (ext) {
                 subagent_backend = ext;
                 external_backend = true;
+                console::log("[subagent %s] inference backend: %s\n",
+                             subagent_type_name(params.type), url.c_str());
             } else {
                 std::string w = "[subagent-backend: " + url + " unavailable, using parent backend]";
                 backend_warning = backend_warning.empty() ? w : backend_warning + " " + w;
+                console::log("[subagent %s] inference backend: parent (fallback from %s)\n",
+                             subagent_type_name(params.type), url.c_str());
             }
         }
     }
