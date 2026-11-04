@@ -1,6 +1,10 @@
 #ifndef SUBAGENT_BACKENDS_H
 #define SUBAGENT_BACKENDS_H
 
+#include "inference-backend.h"
+
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -40,6 +44,25 @@ private:
     std::vector<std::string> urls_;
     mutable std::mutex mutex_;
     size_t next_ = 0;
+};
+
+// Thread-safe pool of external backends cloned from the parent backend via
+// clone_with_base_url(). Successful clones are cached by URL and owned by the
+// pool (returned pointers stay valid for the pool's lifetime). Failed clones
+// (nullptr = dead endpoint / unsupported backend) are NOT cached, so every
+// call retries and a recovered endpoint is picked up again.
+class backend_pool {
+public:
+    explicit backend_pool(inference_backend * parent);
+
+    // Get or create the backend for `url`, cloning from `parent` (falls back
+    // to the constructor's parent when null). nullptr = unavailable.
+    inference_backend * get_or_create(const std::string & url, inference_backend * parent);
+
+private:
+    inference_backend * parent_ = nullptr;
+    std::mutex mutex_;
+    std::map<std::string, std::unique_ptr<inference_backend>> pool_;
 };
 
 } // namespace subagent_backends

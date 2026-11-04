@@ -18,6 +18,7 @@
 class inference_backend;
 struct agent_config;
 class subagent_output_buffer;
+namespace subagent_backends { class backend_pool; class backend_selector; }
 
 // Parameters for running a subagent
 struct subagent_params {
@@ -26,6 +27,7 @@ struct subagent_params {
     std::string description;  // Short description for display
     int64_t max_tokens = 0;   // Generated-token budget for the sub-loop (0 = off)
     int timeout_sec = 0;      // Wall-clock timeout in seconds (0 = no timeout)
+    int backend_index = -1;   // --subagent-backends index; -1 = auto round-robin
 };
 
 // Result from a subagent run
@@ -127,6 +129,12 @@ public:
 private:
     const agent_config & parent_config_;
     tool_context parent_tool_ctx_;
+
+    // External backend pool (--subagent-backends). Lazily initialized on the
+    // first run when parent_config_.subagent_backends is non-empty.
+    std::mutex backend_init_mutex_;
+    std::unique_ptr<subagent_backends::backend_pool> backend_pool_;
+    std::unique_ptr<subagent_backends::backend_selector> backend_selector_;
 
     // Background task management
     mutable std::mutex tasks_mutex_;

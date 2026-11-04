@@ -72,6 +72,7 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
     int64_t max_tokens = args.value("max_tokens", (int64_t) 0);
     int wait_ms = args.value("wait_ms", 0);
     bool want_full = args.value("full", false);
+    int64_t backend_index = args.value("backend", (int64_t) -1);
 
     // Check if we have the required context pointers
     if (!ctx.backend_ptr || !ctx.agent_config_ptr) {
@@ -159,6 +160,7 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
     task_params.description = description.empty() ? type_str + "-task" : description;
     task_params.timeout_sec = timeout_sec > 0 ? timeout_sec : 0;
     task_params.max_tokens = max_tokens > 0 ? max_tokens : 0;
+    task_params.backend_index = backend_index >= 0 ? static_cast<int>(backend_index) : -1;
 
     auto & runner = get_runner(ctx);
 
@@ -251,6 +253,11 @@ static tool_def task_tool = {
                 "type": "integer",
                 "description": "Optional budget on generated tokens for the subagent; on exhaustion it stops cleanly with a partial result (0/absent = unlimited)",
                 "default": 0
+            },
+            "backend": {
+                "type": "integer",
+                "description": "Index of external inference backend from the list in system prompt; omit for auto",
+                "default": -1
             },
             "wait_ms": {
                 "type": "integer",

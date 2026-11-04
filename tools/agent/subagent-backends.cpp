@@ -78,4 +78,28 @@ std::string backend_selector::url_at(size_t index) const {
     return urls_[index];
 }
 
+backend_pool::backend_pool(inference_backend * parent) : parent_(parent) {
+}
+
+inference_backend * backend_pool::get_or_create(const std::string & url, inference_backend * parent) {
+    if (url.empty()) return nullptr;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = pool_.find(url);
+    if (it != pool_.end()) {
+        return it->second.get();
+    }
+    inference_backend * src = parent ? parent : parent_;
+    if (!src) return nullptr;
+    std::unique_ptr<inference_backend> clone;
+    try {
+        clone = src->clone_with_base_url(url);
+    } catch (...) {
+        clone.reset();
+    }
+    if (!clone) return nullptr;  // failures are not cached (endpoint may recover)
+    inference_backend * raw = clone.get();
+    pool_[url] = std::move(clone);
+    return raw;
+}
+
 } // namespace subagent_backends

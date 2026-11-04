@@ -190,6 +190,19 @@ If a skill has `<allowed_tools>`, it declares which tools it needs. This helps y
         system_prompt += tool_output_guard_system_line();
     }
 
+    // External subagent backend pool (--subagent-backends): document the list
+    // so the model can pin a specific endpoint via the task tool's "backend"
+    // parameter (omitted = round-robin/parent backend).
+    if (config.subagents_enabled && !config.subagent_backends.empty()) {
+        system_prompt += "\n# Subagent Inference Backends\n\nExternal inference backends for subagents:";
+        for (size_t i = 0; i < config.subagent_backends.size(); i++) {
+            system_prompt += (i == 0 ? " " : ", ");
+            system_prompt += "[" + std::to_string(i) + "] " + config.subagent_backends[i];
+        }
+        system_prompt += ". Use task parameter backend=<i> to assign a specific brain to a subagent; "
+                         "omit backend for automatic round-robin. Default: parent backend.\n";
+    }
+
     // Store the full system prompt so subagents can reuse it as a prefix
     // (maximizes KV cache hits when parent and subagent share a server slot)
     tool_ctx_.base_system_prompt = system_prompt;

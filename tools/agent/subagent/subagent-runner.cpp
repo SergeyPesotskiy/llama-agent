@@ -3,6 +3,7 @@
 #include "subagent-output.h"
 #include "../agent-loop.h"
 #include "../inference-backend.h"
+#include "../subagent-backends.h"
 #include "../permission-async.h"
 #include "console.h"
 
@@ -295,9 +296,53 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
     // sharing, but interleaved requests evict each other's working context).
     // With --subagent-own-slot: fresh backend bound to a free slot (id_slot = -1),
     // requires --parallel >= 2 on the llama-server.
+    // Lazy init of the external backend pool (--subagent-backends): selector
+    // for round-robin/explicit-index + clone cache, on first subagent run.
+    {
+        std::lock_guard<std::mutex> lock(backend_init_mutex_);
+        if (!backend_selector_ && !parent_config_.subagent_backends.empty()) {
+            backend_selector_ = std::make_unique<subagent_backends::backend_selector>(
+                parent_config_.subagent_backends);
+            backend_pool_ = std::make_unique<subagent_backends::backend_pool>(
+                static_cast<inference_backend *>(parent_tool_ctx_.backend_ptr));
+        }
+    }
+
+    // Select the inference backend for this subagent.
+    // Explicit task "backend" index -> round-robin over --subagent-backends ->
+    // default: share the parent's backend (same server slot if pinned — KV
+    // prefix sharing, but interleaved requests evict each other's working
+    // context). With --subagent-own-slot (parent backend only): fresh backend
+    // bound to a free slot (id_slot = -1), requires --parallel >= 2.
+    std::string backend_warning;
     std::unique_ptr<inference_backend> own_slot_backend;
-    inference_backend * subagent_backend = static_cast<inference_backend *>(parent_tool_ctx_.backend_ptr);
-    if (parent_tool_ctx_.subagent_own_slot && subagent_backend) {
+    inference_backend * parent_backend = static_cast<inference_backend *>(parent_tool_ctx_.backend_ptr);
+    inference_backend * subagent_backend = parent_backend;
+    bool external_backend = false;
+    if (backend_selector_ && !backend_selector_->empty()) {
+        std::string url;
+        if (params.backend_index >= 0) {
+            url = backend_selector_->url_at(static_cast<size_t>(params.backend_index));
+            if (url.empty()) {
+                backend_warning = "[subagent-backend: invalid index " +
+                                  std::to_string(params.backend_index) + ", using auto]";
+                url = backend_selector_->next_url();
+            }
+        } else {
+            url = backend_selector_->next_url();
+        }
+        if (!url.empty()) {
+            inference_backend * ext = backend_pool_->get_or_create(url, parent_backend);
+            if (ext) {
+                subagent_backend = ext;
+                external_backend = true;
+            } else {
+                std::string w = "[subagent-backend: " + url + " unavailable, using parent backend]";
+                backend_warning = backend_warning.empty() ? w : backend_warning + " " + w;
+            }
+        }
+    }
+    if (!external_backend && parent_tool_ctx_.subagent_own_slot && subagent_backend) {
         own_slot_backend = subagent_backend->clone_for_subagent();
         if (own_slot_backend) {
             subagent_backend = own_slot_backend.get();
@@ -413,6 +458,12 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
             result.success = false;
             result.error = "Task timed out";
         }
+    }
+
+    // Backend-assignment warnings become the first line of the task's text
+    // result here (the shared point for the sync path and background get_result).
+    if (!backend_warning.empty()) {
+        result.output = backend_warning + "\n" + result.output;
     }
 
     // Keep the full output retrievable (resume task_id="..."); hand the parent
