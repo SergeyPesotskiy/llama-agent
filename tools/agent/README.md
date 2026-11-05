@@ -463,7 +463,7 @@ Delegate work to specialized subagents that run in their own context window. Rea
 
 **Subagent backend pool (`--subagent-backends`):** offload subagents to external llama-server endpoints so heavy delegated work does not compete with the main agent for slots/GPU.
 
-- **List syntax:** comma-separated entries and/or repeated flags, e.g. `--subagent-backends 192.168.1.10:8080,http://192.168.1.11:8080`. Entries may be `host:port` (the `http://` scheme is added automatically) or full URLs; surrounding spaces are trimmed, trailing `/` stripped, duplicates and invalid entries skipped, order preserved.
+- **List syntax:** comma-separated entries and/or repeated flags, e.g. `--subagent-backends 192.0.2.10:8080,http://192.0.2.11:8080`. Entries may be `host:port` (the `http://` scheme is added automatically) or full URLs; surrounding spaces are trimmed, trailing `/` stripped, duplicates and invalid entries skipped, order preserved.
 - **Assignment order:** explicit `backend=N` index in the `task` tool call → round-robin over the configured endpoints → parent backend (no pool configured or every endpoint dead). There is no per-type mapping: the main agent assigns roles to endpoints at task creation time.
 - **Result warnings:** assignment problems are prefixed to the subagent result as a line, e.g. `[subagent-backend: invalid index 5, using auto]` for an out-of-range `backend` index and `[subagent-backend: http://host:port unavailable, using parent backend]` when the endpoint is dead.
 - **Liveness:** each endpoint is probed via `GET /props` when its clone is first created. A dead or non-llama-server endpoint fails the probe — the task then runs on the parent backend (with the warning above). Failures are not cached: once an endpoint recovers, the next task picks it up again.
@@ -472,7 +472,7 @@ Delegate work to specialized subagents that run in their own context window. Rea
 # main agent on the local server, subagents round-robin over two remote llama-servers
 ./llama-agent --yolo --subagents --max-subagent-depth 1 \
               --backend http --server-url http://127.0.0.1:8080 \
-              --subagent-backends 192.168.1.10:8080,192.168.1.11:8080
+              --subagent-backends 192.0.2.10:8080,192.0.2.11:8080
 ```
 
 **Subagent types:** `explore` (read-only: read/glob/bash with restricted commands), `plan` (read/glob only), `general` (all tools except task), `bash` (shell only). A subagent may spawn further subagents while its depth is below the limit.
