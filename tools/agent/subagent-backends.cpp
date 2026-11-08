@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
 
 namespace subagent_backends {
 
@@ -76,6 +77,80 @@ std::string backend_selector::url_at(size_t index) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (index >= urls_.size()) return {};
     return urls_[index];
+}
+
+// Pick the endpoint with the fewest in-flight leases; ties broken by the
+// round-robin cursor so idle-but-untouched endpoints get used fairly.
+backend_lease backend_selector::acquire_lease() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (urls_.empty()) return {};
+    size_t best = next_ % urls_.size();
+    int best_load = INT_MAX;
+    for (size_t i = 0; i < urls_.size(); i++) {
+        size_t cand = (next_ + i) % urls_.size();
+        int load = in_flight_[urls_[cand]];
+        if (load < best_load) {
+            best_load = load;
+            best = cand;
+        }
+    }
+    next_ = (best + 1) % urls_.size();
+    const std::string & url = urls_[best];
+    in_flight_[url]++;
+    return backend_lease(this, url);
+}
+
+backend_lease backend_selector::acquire_lease_at(size_t index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index >= urls_.size()) return {};
+    const std::string & url = urls_[index];
+    in_flight_[url]++;
+    return backend_lease(this, url);
+}
+
+void backend_selector::release(const std::string & url) {
+    if (url.empty()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = in_flight_.find(url);
+    if (it != in_flight_.end() && it->second > 0) it->second--;
+}
+
+int backend_selector::inflight(const std::string & url) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = in_flight_.find(url);
+    return it == in_flight_.end() ? 0 : it->second;
+}
+
+backend_lease::backend_lease(backend_selector * sel, std::string url)
+    : sel_(sel), url_(std::move(url)) {
+    if (url_.empty()) sel_ = nullptr;
+}
+
+backend_lease::backend_lease(backend_lease && o) noexcept
+    : sel_(o.sel_), url_(std::move(o.url_)) {
+    o.sel_ = nullptr;
+}
+
+backend_lease & backend_lease::operator=(backend_lease && o) noexcept {
+    if (this != &o) {
+        release();
+        sel_ = o.sel_;
+        url_ = std::move(o.url_);
+        o.sel_ = nullptr;
+    }
+    return *this;
+}
+
+backend_lease::~backend_lease() {
+    release();
+}
+
+void backend_lease::release() {
+    if (sel_) {
+        sel_->release(url_);
+        sel_ = nullptr;
+        url_.clear();
+    }
 }
 
 backend_pool::backend_pool(inference_backend * parent) : parent_(parent) {

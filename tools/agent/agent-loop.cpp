@@ -347,6 +347,7 @@ inference_request agent_loop::build_inference_request(
     request.return_progress = true;
     request.id_slot = config_.inference_id_slot;
     request.parse_tool_calls = parse_tool_calls;
+    request.enable_thinking = config_.enable_thinking;
     return request;
 }
 
@@ -490,6 +491,11 @@ agent_loop_result agent_loop::run_streaming(
     });
     if (session_file_) session_file_->append_message(messages_.back());
 
+    // Narration seen across iterations. If the loop is cut off by the
+    // iteration limit, this partial draft is handed back instead of a bare
+    // "Reached maximum iterations" string (graceful-degrade).
+    std::string iter_draft;
+
     while (config_.max_iterations <= 0 || result.iterations < config_.max_iterations) {
         if (should_stop()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
@@ -566,6 +572,7 @@ agent_loop_result agent_loop::run_streaming(
         json assistant_msg = build_assistant_msg(parsed, result.iterations);
         messages_.push_back(assistant_msg);
         if (session_file_) session_file_->append_message(assistant_msg);
+        subagent_append_draft(iter_draft, parsed.content);
 
         // If no tool calls, we're done
         if (parsed.tool_calls.empty()) {
@@ -678,7 +685,11 @@ agent_loop_result agent_loop::run_streaming(
     }
 
     result.stop_reason = agent_stop_reason::MAX_ITERATIONS;
-    result.final_response = "Reached maximum iterations (" + std::to_string(config_.max_iterations) + ")";
+    if (iter_draft.empty()) {
+        result.final_response = "Reached maximum iterations (" + std::to_string(config_.max_iterations) + ")";
+    } else {
+        result.final_response = iter_draft + "\n" + SUBAGENT_MAX_ITER_NOTE;
+    }
     on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
     return result;
 }

@@ -76,6 +76,57 @@ int main() {
     CHECK(sel.next_url() == "http://b:2");
     CHECK(sel.next_url() == "http://a:1");
 
+    // backend_selector leases: least-in-flight assignment with RR tie-break
+    backend_selector lsel({ "a:1", "http://b:2" });
+    CHECK(lsel.inflight("http://a:1") == 0);
+    {
+        auto l1 = lsel.acquire_lease();
+        CHECK(l1.url() == "http://a:1");  // both idle -> RR cursor starts at 0
+        CHECK(lsel.inflight("http://a:1") == 1);
+        auto l2 = lsel.acquire_lease();
+        CHECK(l2.url() == "http://b:2");  // a is busy -> b has fewer in-flight
+        CHECK(lsel.inflight("http://b:2") == 1);
+
+        // explicit index still leases (counts as busy) and validates range
+        auto l3 = lsel.acquire_lease_at(0);
+        CHECK(l3.url() == "http://a:1");
+        CHECK(lsel.inflight("http://a:1") == 2);
+        auto lbad = lsel.acquire_lease_at(42);
+        CHECK(lbad.url().empty());
+
+        // with a=2, b=1 the next auto-lease must prefer b
+        auto l4 = lsel.acquire_lease();
+        CHECK(l4.url() == "http://b:2");
+        CHECK(lsel.inflight("http://b:2") == 2);
+
+        l4.release();
+        l4.release();  // idempotent
+        CHECK(lsel.inflight("http://b:2") == 1);
+        l3.release();
+        CHECK(lsel.inflight("http://a:1") == 1);
+    }
+    // destructors released everything still held (l1, l2)
+    CHECK(lsel.inflight("http://a:1") == 0);
+    CHECK(lsel.inflight("http://b:2") == 0);
+
+    // move-assign releases the previously held lease
+    {
+        auto m1 = lsel.acquire_lease();
+        auto m2 = lsel.acquire_lease();
+        CHECK(lsel.inflight("http://a:1") == 1);
+        CHECK(lsel.inflight("http://b:2") == 1);
+        m2 = lsel.acquire_lease_at(1);  // drops b, leases b again
+        CHECK(lsel.inflight("http://a:1") == 1);
+        CHECK(lsel.inflight("http://b:2") == 1);
+    }
+    CHECK(lsel.inflight("http://a:1") == 0);
+    CHECK(lsel.inflight("http://b:2") == 0);
+
+    backend_selector empty_lsel;
+    CHECK(empty_lsel.acquire_lease().url().empty());
+    CHECK(empty_lsel.acquire_lease_at(0).url().empty());
+    empty_lsel.release("http://a:1");  // must not crash on an empty pool
+
     // --- pool / real backends against two mock llama-servers -----------------------
 
     httplib::Server server_a, server_b;

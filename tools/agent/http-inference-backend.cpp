@@ -367,6 +367,14 @@ json http_inference_backend::build_request_body(const inference_request & reques
         body["stream_options"] = {{"include_usage", true}};
     }
 
+    // Thinking mode: Qwen3-family servers default to reasoning-first and would
+    // spend the whole token budget on thinking (leaving content empty) on
+    // extraction-style calls. Only sent when disabled so default behavior and
+    // prompt/KV caching stay byte-identical for the common case.
+    if (!request.enable_thinking) {
+        body["chat_template_kwargs"] = {{"enable_thinking", false}};
+    }
+
     return body;
 }
 
@@ -633,6 +641,14 @@ inference_result http_inference_backend::complete(
     }
 
     if (request.parse_tool_calls) {
+        // A thinking-by-default server truncated at the token limit can emit the
+        // whole answer in the reasoning channel with content null. Surface it as
+        // content so the loop sees text (and can continue or stop honestly)
+        // instead of getting an empty assistant turn.
+        if (content.empty() && !reasoning.empty()) {
+            content = std::move(reasoning);
+            reasoning.clear();
+        }
         result.message = agent_parse_tool_protocol_response(content, reasoning, request.tools);
         if (result.message.tool_calls.empty() && !native_tool_calls.empty()) {
             result.message.tool_calls = std::move(native_tool_calls);

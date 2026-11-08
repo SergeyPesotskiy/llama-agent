@@ -129,6 +129,23 @@ int main() {
     assert(captured_body["tools"][0]["function"]["name"] == "read");
     assert(captured_body["parse_tool_calls"] == true);
     assert(captured_body["messages"].dump().find("image_url") != std::string::npos);
+    // Default thinking mode: chat_template_kwargs must NOT be sent (keeps the
+    // request byte-identical to the historical protocol for KV/prompt caches).
+    assert(!captured_body.contains("chat_template_kwargs"));
+
+    // --- enable_thinking=false: chat_template_kwargs {"enable_thinking":false} ---
+    {
+        inference_request nothink;
+        nothink.messages = json::array({
+            {{"role", "user"}, {"content", "count"}},
+        });
+        nothink.stream = false;
+        nothink.parse_tool_calls = false;
+        nothink.enable_thinking = false;
+        inference_result r2 = backend.complete(nothink, [](const inference_event &) {}, nullptr);
+        assert(captured_body.contains("chat_template_kwargs"));
+        assert(captured_body["chat_template_kwargs"]["enable_thinking"] == false);
+    }
 
     // --- Context overflow: HTTP 400 exceed_context_size_error must set context_overflow ---
     {

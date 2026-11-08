@@ -62,6 +62,12 @@ struct inference_request {
 
     bool parse_tool_calls = true;
     bool summary = false;
+
+    // Chat-template thinking mode (Qwen3-style enable_thinking). True keeps the
+    // server default; false sends chat_template_kwargs {"enable_thinking": false}
+    // so extraction-style calls answer directly instead of filling max_tokens
+    // with reasoning. Ignored by servers without chat_template_kwargs support.
+    bool enable_thinking = true;
 };
 
 enum class inference_event_type {

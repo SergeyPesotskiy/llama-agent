@@ -15,6 +15,10 @@ agent_loop_result agent_loop::run(const json & user_content) {
     });
     if (session_file_) session_file_->append_message(messages_.back());
 
+    // Partial narration kept for graceful-degrade at the iteration limit
+    // (mirrors run_streaming).
+    std::string iter_draft;
+
     while (config_.max_iterations <= 0 || result.iterations < config_.max_iterations) {
         if (interrupt_requested()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
@@ -89,6 +93,7 @@ agent_loop_result agent_loop::run(const json & user_content) {
         json assistant_msg = build_assistant_msg(parsed, result.iterations);
         messages_.push_back(assistant_msg);
         if (session_file_) session_file_->append_message(assistant_msg);
+        subagent_append_draft(iter_draft, parsed.content);
 
         // If no tool calls, we're done
         if (parsed.tool_calls.empty()) {
@@ -179,6 +184,10 @@ agent_loop_result agent_loop::run(const json & user_content) {
     }
 
     result.stop_reason = agent_stop_reason::MAX_ITERATIONS;
-    result.final_response = "Reached maximum iterations (" + std::to_string(config_.max_iterations) + ")";
+    if (iter_draft.empty()) {
+        result.final_response = "Reached maximum iterations (" + std::to_string(config_.max_iterations) + ")";
+    } else {
+        result.final_response = iter_draft + "\n" + SUBAGENT_MAX_ITER_NOTE;
+    }
     return result;
 }

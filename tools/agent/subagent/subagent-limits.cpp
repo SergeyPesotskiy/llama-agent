@@ -73,3 +73,24 @@ std::string subagent_stop_status(bool task_interrupted, bool parent_interrupted,
     }
     return "";
 }
+
+void subagent_append_draft(std::string & draft, const std::string & text) {
+    if (text.empty()) {
+        return;
+    }
+    if (!draft.empty()) {
+        draft += "\n";
+    }
+    draft += text;
+    // Keep only the tail: a cut-off loop's most recent narration is the most
+    // useful part, and the parent context must stay bounded.
+    constexpr size_t kDraftCap = 8192;
+    if (draft.size() > kDraftCap) {
+        size_t cut = draft.size() - kDraftCap;
+        while (cut < draft.size() &&
+               (static_cast<unsigned char>(draft[cut]) & 0xC0) == 0x80) {
+            cut++;  // snap forward to a UTF-8 boundary
+        }
+        draft.erase(0, cut);
+    }
+}

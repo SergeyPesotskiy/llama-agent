@@ -658,6 +658,7 @@ int main(int argc, char ** argv) {
     std::string server_url;
     std::vector<std::string> extra_skills_paths;
     std::vector<std::string> subagent_backends_list;  // --subagent-backends (repeatable)
+    bool subagent_no_think = false;  // --subagent-no-think
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -847,6 +848,13 @@ int main(int argc, char ** argv) {
             }
         } else if (arg == "--subagent-own-slot") {
             subagent_own_slot = true;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
+        } else if (arg == "--subagent-no-think") {
+            subagent_no_think = true;
             for (int j = i; j < argc - 1; j++) {
                 argv[j] = argv[j + 1];
             }
@@ -1042,6 +1050,7 @@ int main(int argc, char ** argv) {
     config.max_subagent_depth = max_subagent_depth;
     config.subagent_own_slot = subagent_own_slot;
     config.subagent_backends = subagent_backends_list;
+    config.subagent_no_think = subagent_no_think;
     config.tool_output_guard = tool_output_guard;
     if (use_http_backend && inf.is_llama_server && inf.total_slots == 1) {
         config.inference_id_slot = 0;

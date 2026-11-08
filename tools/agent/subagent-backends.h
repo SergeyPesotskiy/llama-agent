@@ -24,7 +24,31 @@ std::string normalize_backend_url(const std::string & in);
 // order-preserving list (invalid entries skipped).
 std::vector<std::string> parse_backends_list(const std::string & csv);
 
-// Thread-safe round-robin picker over a fixed URL list.
+// Thread-safe picker over a fixed URL list. Default assignment is
+// least-in-flight (ties broken round-robin): backends are single-slot servers,
+// so sending a second concurrent task to an already-busy endpoint just queues
+// it for the full latency of the first. Callers hold a lease for the task
+// duration and release it when done.
+class backend_selector;
+
+class backend_lease {
+public:
+    backend_lease() = default;
+    backend_lease(backend_selector * sel, std::string url);
+    backend_lease(backend_lease && o) noexcept;
+    backend_lease & operator=(backend_lease && o) noexcept;
+    backend_lease(const backend_lease &) = delete;
+    backend_lease & operator=(const backend_lease &) = delete;
+    ~backend_lease();
+
+    const std::string & url() const { return url_; }
+    void release();  // idempotent; safe from any thread
+
+private:
+    backend_selector * sel_ = nullptr;
+    std::string url_;
+};
+
 class backend_selector {
 public:
     backend_selector() = default;
@@ -40,10 +64,23 @@ public:
     // Returns normalized URL or empty string when out of range.
     std::string url_at(size_t index) const;
 
+    // Lease-based assignment: acquire() picks the endpoint with the fewest
+    // in-flight tasks (round-robin among equals) and marks it busy;
+    // acquire_at() leases an explicit index. release() decrements.
+    // All return empty url()/lease when the pool is empty or the index is
+    // out of range. Leases release automatically on destruction.
+    backend_lease acquire_lease();
+    backend_lease acquire_lease_at(size_t index);
+    void release(const std::string & url);
+
+    // In-flight count for a URL (0 when unknown) — for tests/diagnostics.
+    int inflight(const std::string & url) const;
+
 private:
     std::vector<std::string> urls_;
     mutable std::mutex mutex_;
     size_t next_ = 0;
+    std::map<std::string, int> in_flight_;
 };
 
 // Thread-safe pool of external backends cloned from the parent backend via

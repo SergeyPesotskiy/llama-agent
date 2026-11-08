@@ -229,10 +229,37 @@ static void test_parallel_runner() {
     std::printf("parallel runner: ok\n");
 }
 
+static void test_draft() {
+    std::string d;
+    subagent_append_draft(d, "");
+    assert(d.empty());
+    subagent_append_draft(d, "part one");
+    subagent_append_draft(d, "part two");
+    assert(d == "part one\npart two");
+
+    // bounded to the last ~8 KB, UTF-8 safe: build 12 KB of multibyte text
+    std::string big;
+    for (int i = 0; i < 4000; i++) {
+        big += "\xc3\xa9x";  // 3 bytes per iteration
+    }
+    std::string d2;
+    subagent_append_draft(d2, big);
+    assert(d2.size() <= 8192);
+    assert(d2.size() + 4 >= 8192);  // kept (cap - at most one UTF-8 sequence)
+    // the kept tail must still be valid UTF-8: parse consumes it exactly
+    size_t i = 0;
+    while (i < d2.size()) {
+        unsigned char c = (unsigned char)d2[i];
+        if (c < 0x80) { i += 1; } else if ((c & 0xE0) == 0xC0) { i += 2; } else if ((c & 0xF0) == 0xE0) { i += 3; } else { i += 4; }
+    }
+    assert(i == d2.size());
+}
+
 int main() {
     test_cap_boundaries();
     test_output_guard();
     test_decisions();
+    test_draft();
     test_parallel_runner();
     std::printf("all subagent-limits tests passed\n");
     return 0;

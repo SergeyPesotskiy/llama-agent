@@ -268,6 +268,10 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
     agent_config subagent_config = parent_config_;
     subagent_config.max_iterations = type_config.max_iterations;
     subagent_config.max_generate_tokens = params.max_tokens;  // 0 = off
+    // --subagent-no-think: subagent completions request thinking-off so
+    // extraction-style tasks answer directly instead of spending the whole
+    // max_tokens budget on reasoning. Parent loop keeps server default.
+    subagent_config.enable_thinking = !parent_config_.subagent_no_think;
     subagent_config.verbose = false;  // Suppress verbose output in subagent
     subagent_config.enable_skills = false;  // No skills for subagents
     subagent_config.enable_agents_md = false;  // No agents.md for subagents
@@ -319,18 +323,22 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
     inference_backend * parent_backend = static_cast<inference_backend *>(parent_tool_ctx_.backend_ptr);
     inference_backend * subagent_backend = parent_backend;
     bool external_backend = false;
+    // Lease on the chosen pool endpoint: held for the whole subagent run so
+    // concurrent tasks see this endpoint as busy (least-in-flight routing).
+    // Releases automatically at scope exit, including early returns/throws.
+    subagent_backends::backend_lease backend_lease;
     if (backend_selector_ && !backend_selector_->empty()) {
-        std::string url;
         if (params.backend_index >= 0) {
-            url = backend_selector_->url_at(static_cast<size_t>(params.backend_index));
-            if (url.empty()) {
+            backend_lease = backend_selector_->acquire_lease_at(static_cast<size_t>(params.backend_index));
+            if (backend_lease.url().empty()) {
                 backend_warning = "[subagent-backend: invalid index " +
                                   std::to_string(params.backend_index) + ", using auto]";
-                url = backend_selector_->next_url();
+                backend_lease = backend_selector_->acquire_lease();
             }
         } else {
-            url = backend_selector_->next_url();
+            backend_lease = backend_selector_->acquire_lease();
         }
+        const std::string url = backend_lease.url();
         if (!url.empty()) {
             inference_backend * ext = backend_pool_->get_or_create(url, parent_backend);
             if (ext) {
@@ -343,6 +351,7 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
                 backend_warning = backend_warning.empty() ? w : backend_warning + " " + w;
                 console::log("[subagent %s] inference backend: parent (fallback from %s)\n",
                              subagent_type_name(params.type), url.c_str());
+                backend_lease.release();  // dead endpoint: don't count it as busy
             }
         }
     }

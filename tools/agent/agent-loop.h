@@ -59,6 +59,16 @@ struct agent_config {
     // round-robin/auto. Normalized URLs (see subagent-backends.h).
     std::vector<std::string> subagent_backends;
 
+    // Chat-template thinking mode for THIS loop's completions. True keeps the
+    // server default. Subagent loops inherit !subagent_no_think below.
+    bool enable_thinking = true;
+
+    // --subagent-no-think: run subagent loops with chat-template thinking
+    // disabled (chat_template_kwargs {"enable_thinking": false}). Prevents
+    // reasoning-only answers from consuming the whole max_tokens budget on
+    // thinking-by-default models (Qwen3 family). The parent loop is unaffected.
+    bool subagent_no_think = false;
+
     // Generated-token budget for this loop. 0 = off. Set per subagent via the
     // task tool's "max_tokens" parameter; when the loop's generated-token
     // counter exceeds it, the loop stops with TOKEN_BUDGET_EXCEEDED.

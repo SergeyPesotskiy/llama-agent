@@ -16,6 +16,17 @@ constexpr size_t SUBAGENT_RESULT_CAP_BYTES = 32768;
 // token budget.
 constexpr const char * SUBAGENT_TOKEN_BUDGET_NOTE = "[subagent token budget exhausted]";
 
+// Trailing marker appended when the loop hit the iteration limit. The partial
+// narration accumulated across iterations is kept ahead of this note so the
+// parent receives the draft instead of a bare failure string.
+constexpr const char * SUBAGENT_MAX_ITER_NOTE = "[subagent reached maximum iterations — output above is a partial draft]";
+
+// Append assistant narration to the running partial draft kept across loop
+// iterations. The draft is bounded to the last ~8 KB (cuts snapped to UTF-8
+// boundaries) so a cut-off loop can return a useful draft without swamping
+// the parent context.
+void subagent_append_draft(std::string & draft, const std::string & text);
+
 // Reason codes stored alongside a per-task interrupt flag (subagent-runner).
 enum subagent_stop_flag_reason {
     SUBAGENT_STOP_NONE = 0,    // flag not set
