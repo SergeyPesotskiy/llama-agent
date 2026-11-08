@@ -255,11 +255,27 @@ static void test_draft() {
     assert(i == d2.size());
 }
 
+static void test_bash_gate() {
+    std::vector<std::string> pats = {"ls", "git log", "git status", "grep", "find", "cd", "head", "cat"};
+    assert(subagent_bash_allowed("ls -la", pats));
+    assert(subagent_bash_allowed("git log --oneline | head -5", pats));
+    assert(subagent_bash_allowed("cd /tmp && grep x file.txt", pats));
+    assert(subagent_bash_allowed("find . -name '*.cpp' ; cat x", pats));
+    assert(subagent_bash_allowed("ls\n", pats));
+    assert(!subagent_bash_allowed("rm -rf /", pats));                 // unknown command
+    assert(!subagent_bash_allowed("lsof", pats));                     // token-boundary: ls-oef != ls
+    assert(!subagent_bash_allowed("ls; rm x", pats));                 // one bad segment
+    assert(!subagent_bash_allowed("cat a && echo hi", pats));         // echo not allowed
+    assert(!subagent_bash_allowed("", pats));                          // nothing to run
+    assert(subagent_bash_allowed("anything", {}));                     // no restriction configured
+}
+
 int main() {
     test_cap_boundaries();
     test_output_guard();
     test_decisions();
     test_draft();
+    test_bash_gate();
     test_parallel_runner();
     std::printf("all subagent-limits tests passed\n");
     return 0;

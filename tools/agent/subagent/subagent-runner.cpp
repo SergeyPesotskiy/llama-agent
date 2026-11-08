@@ -271,7 +271,13 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
     // --subagent-no-think: subagent completions request thinking-off so
     // extraction-style tasks answer directly instead of spending the whole
     // max_tokens budget on reasoning. Parent loop keeps server default.
-    subagent_config.enable_thinking = !parent_config_.subagent_no_think;
+    // Role defaults apply too: explore/bash are gatherers (no-think), plan and
+    // general keep thinking unless the global flag is set.
+    subagent_config.enable_thinking =
+        !(parent_config_.subagent_no_think || type_config.default_no_think);
+    // Worker threads have no prompt channel: resolve permission ASK to an
+    // immediate deny instead of waiting 5 minutes (PR #44 P1).
+    subagent_config.subagent_non_interactive = true;
     subagent_config.verbose = false;  // Suppress verbose output in subagent
     subagent_config.enable_skills = false;  // No skills for subagents
     subagent_config.enable_agents_md = false;  // No agents.md for subagents

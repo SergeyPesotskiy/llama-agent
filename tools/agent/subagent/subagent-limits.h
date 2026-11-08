@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Pure helpers for subagent resource limits and result capping. No runtime
 // dependencies (std only) so they are unit-tested directly in
@@ -26,6 +27,12 @@ constexpr const char * SUBAGENT_MAX_ITER_NOTE = "[subagent reached maximum itera
 // boundaries) so a cut-off loop can return a useful draft without swamping
 // the parent context.
 void subagent_append_draft(std::string & draft, const std::string & text);
+
+// Read-only bash gate for restricted subagents (explore). True only when EVERY
+// command segment (split on ; | & and newlines) starts with one of the allowed
+// prefixes at a token boundary. Empty commands/segments-only input is allowed;
+// any unknown command denies. Pure std so it is unit-tested directly.
+bool subagent_bash_allowed(const std::string & command, const std::vector<std::string> & prefixes);
 
 // Reason codes stored alongside a per-task interrupt flag (subagent-runner).
 enum subagent_stop_flag_reason {

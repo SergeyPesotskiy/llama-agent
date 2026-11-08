@@ -69,6 +69,12 @@ struct agent_config {
     // thinking-by-default models (Qwen3 family). The parent loop is unaffected.
     bool subagent_no_think = false;
 
+    // Subagent loops are non-interactive: permission prompts cannot reach the
+    // user from a worker thread, so ASK resolves to immediate deny instead of
+    // waiting the full prompt timeout (5 min). Set by the subagent runner;
+    // never set on the parent loop.
+    bool subagent_non_interactive = false;
+
     // Generated-token budget for this loop. 0 = off. Set per subagent via the
     // task tool's "max_tokens" parameter; when the loop's generated-token
     // counter exceeds it, the loop stops with TOKEN_BUDGET_EXCEEDED.

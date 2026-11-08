@@ -1,4 +1,5 @@
 #include "agent-loop.h"
+#include "subagent/subagent-limits.h"
 #include "utf8-sanitize.h"
 #include "console.h"
 #include "terminal-image.h"
@@ -44,6 +45,18 @@ agent_loop::prepared_tool_call agent_loop::prepare_tool_call_async(
         }
     }
 
+    // Read-only subagent gate (PR #44 P1: explore read-only must hold). When
+    // this loop is restricted to read-only bash prefixes, deny any command
+    // whose segments are not all allowed — before permissions/execution.
+    if (call.name == "bash" && !bash_patterns_.empty()) {
+        std::string cmd = args.value("command", "");
+        if (!subagent_bash_allowed(cmd, bash_patterns_)) {
+            p.early = {false, "",
+                       "[read-only subagent: command not in allowed read-only prefixes: '" + cmd + "']"};
+            return p;
+        }
+    }
+
     // Determine permission type
     permission_type ptype = permission_type::BASH;
     if (call.name == "read") {
@@ -73,6 +86,10 @@ agent_loop::prepared_tool_call agent_loop::prepare_tool_call_async(
             // In yolo mode all permissions are auto-approved, so skip the
             // external-dir prompt (it would otherwise block in non-TUI runs).
             if (async_perms.is_external_path(path.string()) && !async_perms.is_yolo()) {
+                if (config_.subagent_non_interactive) {
+                    p.early = {false, "", "Blocked: File is outside working directory (subagents cannot prompt)"};
+                    return p;
+                }
                 permission_request ext_req;
                 ext_req.type = permission_type::EXTERNAL_DIR;
                 ext_req.tool_name = call.name;
@@ -114,6 +131,10 @@ agent_loop::prepared_tool_call agent_loop::prepare_tool_call_async(
     std::string args_hash = std::to_string(hasher(call.arguments));
     // In yolo mode all permissions are auto-approved (no blocking prompt).
     if (async_perms.is_doom_loop(call.name, args_hash) && !async_perms.is_yolo()) {
+        if (config_.subagent_non_interactive) {
+            p.early = {false, "", "Blocked: Detected repeated identical tool calls (subagents cannot prompt)"};
+            return p;
+        }
         req.description = "Detected repeated identical tool calls (doom loop)";
 
         std::string req_id = async_perms.request_permission(req);
@@ -141,6 +162,16 @@ agent_loop::prepared_tool_call agent_loop::prepare_tool_call_async(
     }
 
     if (state == permission_state::ASK) {
+        if (config_.subagent_non_interactive) {
+            // No prompt channel exists from a worker thread: resolve ASK to an
+            // immediate deny with guidance instead of hanging for the full
+            // 5-minute prompt timeout (PR #44 P1: subagent permissions).
+            on_event(agent_event::permission_resolved("subagent-auto-deny", false));
+            p.early = {false, "",
+                       "Blocked: subagent cannot request permission interactively; "
+                       "approve the operation for the parent agent or run with --yolo"};
+            return p;
+        }
         // Request permission asynchronously
         std::string req_id = async_perms.request_permission(req);
         on_event(agent_event::permission_required(

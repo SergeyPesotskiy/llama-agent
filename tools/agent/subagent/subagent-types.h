@@ -22,6 +22,11 @@ struct subagent_type_config {
     std::vector<std::string> bash_patterns; // For EXPLORE: allowed bash command prefixes
     bool can_write_files;
     int max_iterations;
+    // Role-default for chat-template thinking. Gatherer roles (explore/bash)
+    // answer directly (fast, no reasoning-channel budget waste); planning and
+    // general keep the server default. Global --subagent-no-think overrides
+    // everything; an explicit task-level need for reasoning should use plan/general.
+    bool default_no_think = false;
 };
 
 // Get configuration for a subagent type

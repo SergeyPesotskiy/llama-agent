@@ -94,3 +94,44 @@ void subagent_append_draft(std::string & draft, const std::string & text) {
         draft.erase(0, cut);
     }
 }
+
+bool subagent_bash_allowed(const std::string & command, const std::vector<std::string> & prefixes) {
+    if (prefixes.empty()) {
+        return true;  // no restriction configured
+    }
+    // Split into segments on shell separators; every segment must pass.
+    size_t start = 0;
+    const std::string seps = ";|&\n";
+    auto check_segment = [&prefixes](const std::string & seg_in) {
+        // trim
+        size_t b = seg_in.find_first_not_of(" \t");
+        if (b == std::string::npos) {
+            return true;  // empty between separators
+        }
+        size_t e = seg_in.find_last_not_of(" \t");
+        std::string seg = seg_in.substr(b, e - b + 1);
+        for (const auto & pat : prefixes) {
+            if (pat.empty()) continue;
+            if (seg.size() >= pat.size() && seg.compare(0, pat.size(), pat) == 0) {
+                if (seg.size() == pat.size() || seg[pat.size()] == ' ' || seg[pat.size()] == '\t') {
+                    return true;  // whole-token prefix match
+                }
+            }
+        }
+        return false;
+    };
+    bool any = false;
+    while (start <= command.size()) {
+        size_t cut = command.find_first_of(seps, start);
+        std::string seg = command.substr(start, cut == std::string::npos ? std::string::npos : cut - start);
+        if (!check_segment(seg)) {
+            return false;
+        }
+        if (seg.find_first_not_of(" \t") != std::string::npos) {
+            any = true;
+        }
+        if (cut == std::string::npos) break;
+        start = cut + 1;
+    }
+    return any;
+}

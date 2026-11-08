@@ -35,7 +35,8 @@ static const std::map<subagent_type, subagent_type_config> SUBAGENT_CONFIGS = {
         // Allowed bash command prefixes for read-only exploration
         k_explore_bash_patterns,
         false,  // can_write_files
-        20      // max_iterations
+        20,     // max_iterations
+        true    // default_no_think: read-only gathering answers directly
     }},
     {subagent_type::PLAN, {
         "plan",
@@ -65,7 +66,8 @@ static const std::map<subagent_type, subagent_type_config> SUBAGENT_CONFIGS = {
         {"bash"},
         {},     // No bash restrictions
         false,  // can_write_files (through bash, not tools)
-        10      // max_iterations
+        10,     // max_iterations
+        true    // default_no_think: command runners answer directly
     }},
 };
 
