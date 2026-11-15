@@ -206,6 +206,9 @@ std::vector<std::string> tui_render_footer(const tui_footer_state & state, int w
     std::string ctx_text = std::to_string(ctx_pct) + "%/";
     ctx_text += ctx_k > 0 ? std::to_string(ctx_k) + "K" : "--K";
     ss << " | " << ctx_text;
+    if (!state.conn_info.empty()) {
+        ss << " | " << state.conn_info;
+    }
     if (!state.transient_label.empty()) {
         ss << " | " << state.transient_label;
     }
@@ -320,6 +323,7 @@ tui_renderer::tui_renderer(config cfg)
     footer_.working_dir = cfg_.working_dir;
     footer_.session_path = cfg_.session_path;
     footer_.meta = cfg_.meta;
+    footer_.conn_info = cfg_.conn_info;
     last_spinner_tick_ = std::chrono::steady_clock::now();
     last_idle_tick_ = last_spinner_tick_;
 

@@ -47,6 +47,12 @@
 #include <utility>
 #include <signal.h>
 #include <filesystem>
+#ifndef _WIN32
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -54,6 +60,8 @@
 #   define NOMINMAX
 #endif
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <shellapi.h>
 #undef ERROR
 #include <io.h>
@@ -628,6 +636,141 @@ static void rebuild_argv_utf8(int & argc, char ** & argv,
     argv = ptrs.data();
 }
 #endif // _WIN32
+
+namespace {
+
+// Formats the status-line connection segment: "<source ip> > <destination ip:port>".
+// The source ip is the address the OS actually routes to the inference server with;
+// for the local backend both sides are the machine's own address ("write what there is").
+std::string agent_status_conn_info(bool via_http, const std::string & server_url) {
+#ifdef _WIN32
+    WSADATA wsa_data;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        return std::string();
+    }
+#endif
+    auto numeric_ip = [](const struct sockaddr * sa, socklen_t sl) -> std::string {
+        char host[NI_MAXHOST] = {};
+        if (getnameinfo(sa, sl, host, sizeof(host), nullptr, 0, NI_NUMERICHOST) == 0) {
+            std::string out(host);
+            const auto pct = out.find('%');  // drop IPv6 scope id
+            if (pct != std::string::npos) {
+                out.erase(pct);
+            }
+            return out;
+        }
+        return std::string();
+    };
+    auto resolve_first_ip = [&](const std::string & host) -> std::string {
+        struct addrinfo hints {};
+        struct addrinfo * res = nullptr;
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
+            return std::string();
+        }
+        std::string out = numeric_ip(res->ai_addr, res->ai_addrlen);
+        freeaddrinfo(res);
+        return out;
+    };
+    auto source_ip_for = [&](const std::string & host, const std::string & port) -> std::string {
+        struct addrinfo hints {};
+        struct addrinfo * res = nullptr;
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;  // connect() on a dgram socket sends nothing
+        std::string out;
+        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0 && res != nullptr) {
+            for (struct addrinfo * ai = res; ai != nullptr; ai = ai->ai_next) {
+                const int fd = static_cast<int>(socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
+                if (fd < 0) {
+                    continue;
+                }
+                if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+                    struct sockaddr_storage local {};
+                    socklen_t len = sizeof(local);
+                    if (getsockname(fd, reinterpret_cast<struct sockaddr *>(&local), &len) == 0) {
+                        out = numeric_ip(reinterpret_cast<const struct sockaddr *>(&local), len);
+                    }
+#ifdef _WIN32
+                    closesocket(static_cast<SOCKET>(fd));
+#else
+                    close(fd);
+#endif
+                    if (!out.empty()) {
+                        break;
+                    }
+                } else {
+#ifdef _WIN32
+                    closesocket(static_cast<SOCKET>(fd));
+#else
+                    close(fd);
+#endif
+                }
+            }
+            freeaddrinfo(res);
+        }
+        return out;
+    };
+
+    std::string dst_host;
+    std::string dst_port;
+    if (via_http && !server_url.empty()) {
+        std::string s = server_url;
+        bool https = false;
+        const auto scheme = s.find("://");
+        if (scheme != std::string::npos) {
+            https = s.compare(0, scheme, "https") == 0;
+            s = s.substr(scheme + 3);
+        }
+        const auto slash = s.find('/');
+        if (slash != std::string::npos) {
+            s = s.substr(0, slash);
+        }
+        if (!s.empty() && s.front() == '[') {  // [ipv6]:port
+            const auto close_br = s.find(']');
+            dst_host = s.substr(1, close_br == std::string::npos ? std::string::npos : close_br - 1);
+            if (close_br != std::string::npos && close_br + 1 < s.size() && s[close_br + 1] == ':') {
+                dst_port = s.substr(close_br + 2);
+            }
+        } else {
+            const auto colon = s.rfind(':');
+            if (colon != std::string::npos) {
+                dst_host = s.substr(0, colon);
+                dst_port = s.substr(colon + 1);
+            } else {
+                dst_host = s;
+            }
+        }
+        if (dst_port.empty()) {
+            dst_port = https ? "443" : "80";
+        }
+    }
+
+    std::string src_ip;
+    if (!dst_host.empty()) {
+        src_ip = source_ip_for(dst_host, dst_port);
+    }
+    if (src_ip.empty()) {
+        src_ip = source_ip_for("8.8.8.8", "53");  // default-route probe, no packets sent
+    }
+    if (src_ip.empty()) {
+        char hn[NI_MAXHOST] = {};
+        if (gethostname(hn, sizeof(hn) - 1) == 0) {
+            src_ip = resolve_first_ip(hn);
+        }
+    }
+    if (src_ip.empty()) {
+        src_ip = "127.0.0.1";
+    }
+
+    if (dst_host.empty()) {
+        return src_ip + " > " + src_ip;  // in-process inference: both ends are this machine
+    }
+    const std::string dst_ip = resolve_first_ip(dst_host);
+    return src_ip + " > " + (dst_ip.empty() ? dst_host : dst_ip) + ":" + dst_port;
+}
+
+}  // namespace
 
 int main(int argc, char ** argv) {
 #ifdef _WIN32
@@ -1244,6 +1387,7 @@ int main(int argc, char ** argv) {
         tui_cfg.working_dir = working_dir;
         tui_cfg.session_path = session_path;
         tui_cfg.meta = inf;
+        tui_cfg.conn_info = agent_status_conn_info(use_http_backend, server_url);
         tui_cfg.permissions = &tui_permissions;
         tui_cfg.interrupt = []() { g_is_interrupted.store(true); };
         tui = std::make_unique<tui_renderer>(std::move(tui_cfg));

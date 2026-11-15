@@ -164,6 +164,7 @@ static void test_footer_and_agent_event_projection() {
     footer.stats.total_predicted_ms = 1000.0;
     footer.last_prompt_tokens = 50;
     footer.generating = true;
+    footer.conn_info = "10.0.0.5 > 10.0.0.9:8080";
     auto lines = tui_render_footer(footer, 80, false);
     require(lines.size() == 2, "footer did not render two lines");
     require(lines[1].find("test-model") != std::string::npos, "footer missing model");
@@ -171,6 +172,14 @@ static void test_footer_and_agent_event_projection() {
             "footer missing token arrows");
     require(lines[1].find("5.0 tok/s") != std::string::npos, "footer missing speed");
     require(lines[1].find("50%/1K") != std::string::npos, "footer missing context fill");
+    require(lines[1].find("50%/1K | 10.0.0.5 > 10.0.0.9:8080") != std::string::npos,
+            "footer missing connection info after context fill");
+
+    // empty conn_info must not add a separator (non-http / unknown backends)
+    footer.conn_info.clear();
+    auto lines2 = tui_render_footer(footer, 80, false);
+    require(lines2[1].find(" |  | ") == std::string::npos && lines2[1].find("10.0.0.5") == std::string::npos,
+            "footer leaked connection info when unset");
 
     session_stats stats;
     stats.total_input = 7;

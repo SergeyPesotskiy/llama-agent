@@ -37,6 +37,7 @@ struct tui_footer_state {
     bool generating = false;
     size_t spinner_frame = 0;
     std::string transient_label;
+    std::string conn_info;  // "local_ip > server_ip:port" shown in the status line
 };
 
 std::vector<std::string> tui_render_footer(const tui_footer_state & state, int width, bool color);
@@ -51,6 +52,7 @@ public:
         std::string working_dir;
         std::string session_path;
         inference_backend_meta meta;
+        std::string conn_info;
         permission_manager_async * permissions = nullptr;
         std::function<void()> interrupt;
     };
