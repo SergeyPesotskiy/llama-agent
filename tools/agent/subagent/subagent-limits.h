@@ -59,3 +59,32 @@ bool subagent_should_stop_on_token_budget(int64_t generated_tokens, int64_t max_
 // distinguishable from a parent-wide Ctrl+C. Returns "cancelled", "timeout",
 // "interrupted" (parent) or "" (not an interruption).
 std::string subagent_stop_status(bool task_interrupted, bool parent_interrupted, int reason);
+
+// Tool-call budget (task tool "max_tool_calls"). Marked on the denied call's
+// result so the model wraps up instead of exploring further.
+constexpr const char * SUBAGENT_TOOL_BUDGET_NOTE =
+    "[subagent tool budget exhausted - produce your final answer from what you have]";
+
+enum subagent_tool_budget_state {
+    SUBAGENT_TOOL_BUDGET_OK = 0,        // run the call
+    SUBAGENT_TOOL_BUDGET_WARNING = 1,   // run it, annotate usage at >=80%
+    SUBAGENT_TOOL_BUDGET_EXHAUSTED = 2, // deny the call with SUBAGENT_TOOL_BUDGET_NOTE
+};
+
+// max_calls <= 0 disables the budget (always OK). used counts calls already run.
+subagent_tool_budget_state subagent_tool_budget_check(int64_t used, int64_t max_calls);
+
+// "[tool budget: used X of Y]" - emitted for the WARNING state.
+std::string subagent_tool_budget_note(int64_t used, int64_t max_calls);
+
+// Aggregate per-call summary lines "name (123ms)" into one line per tool:
+// "name xN, total Mms" (first-appearance order). Lines that do not parse are
+// passed through unchanged so information is never silently lost.
+std::vector<std::string> subagent_aggregate_tool_calls(const std::vector<std::string> & entries);
+
+// Replacement body for an oversized subagent answer offloaded to a file:
+// head preview (<= preview_bytes, snapped to a UTF-8 boundary) + a note with
+// the path, byte counters and the resume hint. Pure text; writing the file is
+// the caller's job (and its failure is the caller's fallback to subagent_cap_result).
+std::string subagent_offload_note(const std::string & text, const std::string & path,
+                                  const std::string & task_id, size_t preview_bytes);

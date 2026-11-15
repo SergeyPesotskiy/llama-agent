@@ -1,5 +1,6 @@
 #include "subagent-limits.h"
 
+#include <map>
 #include <string>
 
 namespace {
@@ -134,4 +135,92 @@ bool subagent_bash_allowed(const std::string & command, const std::vector<std::s
         start = cut + 1;
     }
     return any;
+}
+
+subagent_tool_budget_state subagent_tool_budget_check(int64_t used, int64_t max_calls) {
+    if (max_calls <= 0) {
+        return SUBAGENT_TOOL_BUDGET_OK;
+    }
+    if (used >= max_calls) {
+        return SUBAGENT_TOOL_BUDGET_EXHAUSTED;
+    }
+    if (used * 5 >= max_calls * 4) {  // >= 80% without float
+        return SUBAGENT_TOOL_BUDGET_WARNING;
+    }
+    return SUBAGENT_TOOL_BUDGET_OK;
+}
+
+std::string subagent_tool_budget_note(int64_t used, int64_t max_calls) {
+    return "[tool budget: used " + std::to_string(used) + " of " + std::to_string(max_calls) + "]";
+}
+
+std::vector<std::string> subagent_aggregate_tool_calls(const std::vector<std::string> & entries) {
+    struct agg {
+        int64_t count = 0;
+        long long total_ms = 0;
+    };
+    std::vector<std::string> order;                 // first-appearance order of names
+    std::map<std::string, agg> by_name;
+    std::vector<std::string> passthrough;
+
+    for (const auto & line : entries) {
+        // Expected shape: "name (123ms)". Anything else is passed through.
+        const size_t open = line.rfind(" (");
+        const bool closes = open != std::string::npos &&
+                            line.size() > 2 && line.compare(line.size() - 3, 3, "ms)") == 0;
+        std::string ms_part;
+        if (closes) {
+            ms_part = line.substr(open + 2, line.size() - 3 - (open + 2));
+        }
+        bool numeric = !ms_part.empty();
+        long long ms = 0;
+        if (numeric) {
+            try {
+                size_t pos = 0;
+                ms = std::stoll(ms_part, &pos);
+                if (pos != ms_part.size()) {
+                    numeric = false;
+                }
+            } catch (...) {
+                numeric = false;
+            }
+        }
+        if (!numeric || open == 0) {
+            passthrough.push_back(line);
+            continue;
+        }
+        const std::string name = line.substr(0, open);
+        if (by_name.find(name) == by_name.end()) {
+            order.push_back(name);
+        }
+        by_name[name].count++;
+        by_name[name].total_ms += ms;
+    }
+
+    std::vector<std::string> out;
+    out.reserve(order.size() + passthrough.size());
+    for (const auto & name : order) {
+        const auto & a = by_name[name];
+        out.push_back(name + " x" + std::to_string(a.count) +
+                      ", total " + std::to_string(a.total_ms) + "ms");
+    }
+    for (const auto & raw : passthrough) {
+        out.push_back(raw);
+    }
+    return out;
+}
+
+std::string subagent_offload_note(const std::string & text, const std::string & path,
+                                  const std::string & task_id, size_t preview_bytes) {
+    size_t cut = preview_bytes < text.size() ? utf8_floor(text, preview_bytes) : text.size();
+    std::string out = "[large answer offloaded: " + std::to_string(text.size()) +
+                      " bytes written to " + path +
+                      ". First " + std::to_string(cut) + " bytes below - read the file with" +
+                      " offset/limit only if the preview is insufficient (full output also" +
+                      " stays available via resume task_id=" + task_id + ").]\n\n";
+    out += text.substr(0, cut);
+    if (cut < text.size()) {
+        out += "\n[... remainder in the file ...]";
+    }
+    return out;
 }

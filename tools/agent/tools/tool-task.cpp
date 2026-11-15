@@ -73,6 +73,10 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
     int wait_ms = args.value("wait_ms", 0);
     bool want_full = args.value("full", false);
     int64_t backend_index = args.value("backend", (int64_t) -1);
+    int64_t max_tool_calls = args.value("max_tool_calls", (int64_t) 0);
+    if (max_tool_calls < 0) {
+        max_tool_calls = 0;
+    }
 
     // Check if we have the required context pointers
     if (!ctx.backend_ptr || !ctx.agent_config_ptr) {
@@ -102,8 +106,8 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
             output << " in " << result.iterations << " iteration(s)\n";
 
             if (!result.tool_calls_summary.empty()) {
-                output << "\nTools called:\n";
-                for (const auto & tc : result.tool_calls_summary) {
+                output << "\nTools:\n";
+                for (const auto & tc : subagent_aggregate_tool_calls(result.tool_calls_summary)) {
                     output << "  - " << tc << "\n";
                 }
             }
@@ -161,6 +165,7 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
     task_params.timeout_sec = timeout_sec > 0 ? timeout_sec : 0;
     task_params.max_tokens = max_tokens > 0 ? max_tokens : 0;
     task_params.backend_index = backend_index >= 0 ? static_cast<int>(backend_index) : -1;
+    task_params.max_tool_calls = max_tool_calls > 0 ? static_cast<int>(max_tool_calls) : 0;
 
     auto & runner = get_runner(ctx);
 
@@ -186,8 +191,8 @@ static tool_result task_execute(const json & args, const tool_context & ctx) {
         output << " in " << result.iterations << " iteration(s)\n";
 
         if (!result.tool_calls_summary.empty()) {
-            output << "\nTools called:\n";
-            for (const auto & tc : result.tool_calls_summary) {
+            output << "\nTools:\n";
+            for (const auto & tc : subagent_aggregate_tool_calls(result.tool_calls_summary)) {
                 output << "  - " << tc << "\n";
             }
         }
@@ -216,6 +221,8 @@ static tool_def task_tool = {
     "- Call again with resume=\"task_id\" to check status or get results\n"
     "- Optional timeout (seconds) and max_tokens (generated-token budget) bound a run;\n"
     "  partial output is kept when either fires\n"
+    "- max_tool_calls caps tool calls inside the subagent (0/absent = unlimited); at 80%\n"
+    "  usage the subagent is nudged to wrap up, beyond the cap calls are denied\n"
     "- With resume: wait_ms long-polls up to N ms for completion (saves polling turns);\n"
     "  full=true returns the uncapped stored output",
     R"json({
@@ -252,6 +259,11 @@ static tool_def task_tool = {
             "max_tokens": {
                 "type": "integer",
                 "description": "Optional budget on generated tokens for the subagent; on exhaustion it stops cleanly with a partial result (0/absent = unlimited)",
+                "default": 0
+            },
+            "max_tool_calls": {
+                "type": "integer",
+                "description": "Optional cap on tool calls made by the subagent; beyond it calls are denied with an instruction to summarize (0/absent = unlimited)",
                 "default": 0
             },
             "backend": {

@@ -8,6 +8,9 @@
 #include "console.h"
 
 #include <chrono>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <random>
 #include <sstream>
 
@@ -268,6 +271,10 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
     agent_config subagent_config = parent_config_;
     subagent_config.max_iterations = type_config.max_iterations;
     subagent_config.max_generate_tokens = params.max_tokens;  // 0 = off
+    subagent_config.max_tool_calls = params.max_tool_calls;   // 0 = unlimited
+    // Subagents see their iteration budget in every turn (the main loop keeps
+    // its history untouched).
+    subagent_config.report_iteration_budget = true;
     // --subagent-no-think: subagent completions request thinking-off so
     // extraction-style tasks answer directly instead of spending the whole
     // max_tokens budget on reasoning. Parent loop keeps server default.
@@ -487,12 +494,41 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
 
     // Keep the full output retrievable (resume task_id="..."); hand the parent
     // a capped copy so one verbose subagent cannot blow up the parent context.
+    // Over the cap the full text is offloaded to a file when possible and the
+    // parent gets a small preview plus the path; if the file cannot be
+    // written we fall back to the historical head/tail cap.
     if (!result.output.empty()) {
         {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             full_results_[result.task_id] = result.output;
         }
-        result.output = subagent_cap_result(result.output, result.task_id);
+        bool offloaded = false;
+        if (result.output.size() > SUBAGENT_RESULT_CAP_BYTES) {
+            try {
+                std::filesystem::path dir("/tmp/task-out");
+                std::error_code ec;
+                std::filesystem::create_directories(dir, ec);
+                std::string safe_id;
+                for (char c : result.task_id) {
+                    safe_id += (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '.' || c == '_')
+                        ? c : '-';
+                }
+                if (!ec && !safe_id.empty()) {
+                    const std::filesystem::path file = dir / (safe_id + ".out");
+                    std::ofstream f(file, std::ios::binary | std::ios::trunc);
+                    if (f && f.write(result.output.data(), (std::streamsize) result.output.size())) {
+                        result.output = subagent_offload_note(result.output, file.string(),
+                                                             result.task_id, 1024);
+                        offloaded = true;
+                    }
+                }
+            } catch (...) {
+                offloaded = false;  // any FS problem: behave like before
+            }
+        }
+        if (!offloaded) {
+            result.output = subagent_cap_result(result.output, result.task_id);
+        }
     }
 
     return result;

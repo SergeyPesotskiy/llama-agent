@@ -270,12 +270,58 @@ static void test_bash_gate() {
     assert(subagent_bash_allowed("anything", {}));                     // no restriction configured
 }
 
+static void test_tool_budget_and_offload() {
+    // budget states
+    assert(subagent_tool_budget_check(0, 0) == SUBAGENT_TOOL_BUDGET_OK);      // off
+    assert(subagent_tool_budget_check(99, 0) == SUBAGENT_TOOL_BUDGET_OK);     // off
+    assert(subagent_tool_budget_check(3, 10) == SUBAGENT_TOOL_BUDGET_OK);
+    assert(subagent_tool_budget_check(7, 10) == SUBAGENT_TOOL_BUDGET_OK);     // <80%
+    assert(subagent_tool_budget_check(8, 10) == SUBAGENT_TOOL_BUDGET_WARNING);// ==80%
+    assert(subagent_tool_budget_check(9, 10) == SUBAGENT_TOOL_BUDGET_WARNING);
+    assert(subagent_tool_budget_check(10, 10) == SUBAGENT_TOOL_BUDGET_EXHAUSTED);
+    assert(subagent_tool_budget_check(11, 10) == SUBAGENT_TOOL_BUDGET_EXHAUSTED);
+    assert(subagent_tool_budget_note(8, 10) == "[tool budget: used 8 of 10]");
+
+    // aggregation
+    std::vector<std::string> raw = {
+        "read (10ms)", "bash (5ms)", "read (20ms)", "glob (1ms)",
+        "read (7ms)", "weird-line-without-ms", "edit (badms)",
+    };
+    auto agg = subagent_aggregate_tool_calls(raw);
+    assert(agg.size() == 5);  // read, bash, glob + two passthroughs
+    assert(agg[0] == "read x3, total 37ms");
+    assert(agg[1] == "bash x1, total 5ms");
+    assert(agg[2] == "glob x1, total 1ms");
+    assert(agg[3] == "weird-line-without-ms");
+    assert(agg[4] == "edit (badms)");
+    assert(subagent_aggregate_tool_calls({}).empty());
+
+    // offload note: preview within the bound, utf-8 safe, path/counters present
+    std::string text;
+    while (text.size() < 5000) {
+        text += "строка привет " + std::to_string(text.size()) + "\n";  // 2-byte cyrillic
+    }
+    auto note = subagent_offload_note(text, "/tmp/task-out/t1.out", "t1", 100);
+    assert(note.find("/tmp/task-out/t1.out") != std::string::npos);
+    assert(note.find("task_id=t1") != std::string::npos);
+    assert(note.find("bytes written to") != std::string::npos);
+    assert(note.find("[... remainder in the file ...]") != std::string::npos);
+    // the preview cut is snapped to a UTF-8 boundary by subagent_offload_note
+    // (utf8_floor); a truncated multibyte head would still decode cleanly here.
+    assert(note.size() > 100);
+    // small text: preview contains everything, no remainder marker
+    auto small = subagent_offload_note("short body", "/p", "id", 1024);
+    assert(small.find("short body") != std::string::npos);
+    assert(small.find("remainder") == std::string::npos);
+}
+
 int main() {
     test_cap_boundaries();
     test_output_guard();
     test_decisions();
     test_draft();
     test_bash_gate();
+    test_tool_budget_and_offload();
     test_parallel_runner();
     std::printf("all subagent-limits tests passed\n");
     return 0;

@@ -355,6 +355,43 @@ inference_request agent_loop::build_inference_request(
 // Message helpers
 // ---------------------------------------------------------------------------
 
+void agent_loop::append_note_to_last_msg(const std::string & note) {
+    if (messages_.empty() || note.empty()) {
+        return;
+    }
+    json & back = messages_.back();
+    if (back.contains("content") && back["content"].is_string()) {
+        back["content"] = back["content"].get<std::string>() + note;
+    }
+}
+
+void agent_loop::update_iteration_budget_note(int iteration, int max_iterations) {
+    // Drop the previous turn's note when it is still the tail of the last
+    // message; if history moved on (new tool message, compaction), leave it -
+    // the note was never written to the session file either way.
+    if (!active_iter_note_.empty() && !messages_.empty()) {
+        json & back = messages_.back();
+        if (back.contains("content") && back["content"].is_string()) {
+            std::string c = back["content"].get<std::string>();
+            const size_t at = c.rfind(active_iter_note_);
+            if (at != std::string::npos && at + active_iter_note_.size() == c.size()) {
+                back["content"] = c.erase(at);
+            }
+        }
+        active_iter_note_.clear();
+    }
+    std::string note = max_iterations > 0
+        ? "\n[iter " + std::to_string(iteration) + "/" + std::to_string(max_iterations) +
+          ": near the limit - stop exploring and write your final answer]"
+        : "\n[iter " + std::to_string(iteration) + "]";
+    if (messages_.empty() || !messages_.back().contains("content") ||
+        !messages_.back()["content"].is_string()) {
+        return;  // multimodal or structured content: skip the note this turn
+    }
+    active_iter_note_ = note;
+    append_note_to_last_msg(note);
+}
+
 void agent_loop::add_tool_result_message(const std::string & tool_name,
                                           const std::string & call_id,
                                           const tool_result & result) {
@@ -496,6 +533,9 @@ agent_loop_result agent_loop::run_streaming(
     // "Reached maximum iterations" string (graceful-degrade).
     std::string iter_draft;
 
+    // Tool-call counter for the per-loop max_tool_calls budget.
+    int64_t tool_calls_used = 0;
+
     while (config_.max_iterations <= 0 || result.iterations < config_.max_iterations) {
         if (should_stop()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
@@ -504,6 +544,9 @@ agent_loop_result agent_loop::run_streaming(
         }
 
         result.iterations++;
+        if (config_.report_iteration_budget) {
+            update_iteration_budget_note(result.iterations, config_.max_iterations);
+        }
 
         // Emit iteration start event
         on_event(agent_event::iteration_start(result.iterations, config_.max_iterations));
@@ -601,6 +644,15 @@ agent_loop_result agent_loop::run_streaming(
                     cancelled_mid = true;
                     break;
                 }
+                if (config_.max_tool_calls > 0 &&
+                    subagent_tool_budget_check(tool_calls_used, config_.max_tool_calls) ==
+                        SUBAGENT_TOOL_BUDGET_EXHAUSTED) {
+                    tool_result denied;
+                    denied.success = false;
+                    denied.error = SUBAGENT_TOOL_BUDGET_NOTE;
+                    results[ci] = denied;
+                    continue;
+                }
                 on_event(agent_event::tool_start(call.name, call.arguments));
 
                 if (call.name == "task") {
@@ -621,12 +673,14 @@ agent_loop_result agent_loop::run_streaming(
                         elapsed_ms[ci] = std::chrono::duration_cast<std::chrono::milliseconds>(
                             t1 - t0).count();
                     });
+                    tool_calls_used++;
                 } else {
                     auto t0 = std::chrono::steady_clock::now();
                     results[ci] = execute_tool_call_async(call, on_event, *async_perms, should_stop);
                     auto t1 = std::chrono::steady_clock::now();
                     elapsed_ms[ci] = std::chrono::duration_cast<std::chrono::milliseconds>(
                         t1 - t0).count();
+                    tool_calls_used++;
                 }
             }
 
@@ -647,6 +701,11 @@ agent_loop_result agent_loop::run_streaming(
                 std::string call_id = call.id.empty() ? ("call_" + std::to_string(result.iterations)) : call.id;
                 add_tool_result_message(call.name, call_id, results[ci]);
             }
+            if (config_.max_tool_calls > 0 &&
+                subagent_tool_budget_check(tool_calls_used, config_.max_tool_calls) ==
+                    SUBAGENT_TOOL_BUDGET_WARNING) {
+                append_note_to_last_msg("\n" + subagent_tool_budget_note(tool_calls_used, config_.max_tool_calls));
+            }
             continue;
         }
 
@@ -656,6 +715,19 @@ agent_loop_result agent_loop::run_streaming(
                 result.stop_reason = agent_stop_reason::USER_CANCELLED;
                 on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
                 return result;
+            }
+
+            if (config_.max_tool_calls > 0 &&
+                subagent_tool_budget_check(tool_calls_used, config_.max_tool_calls) ==
+                    SUBAGENT_TOOL_BUDGET_EXHAUSTED) {
+                tool_result denied;
+                denied.success = false;
+                denied.error = SUBAGENT_TOOL_BUDGET_NOTE;
+                on_event(agent_event::tool_start(call.name, call.arguments));
+                on_event(agent_event::tool_result(call.name, false, "", 0, denied.error, false));
+                std::string call_id = call.id.empty() ? ("call_" + std::to_string(result.iterations)) : call.id;
+                add_tool_result_message(call.name, call_id, denied);
+                continue;
             }
 
             // Emit tool start event
@@ -681,6 +753,12 @@ agent_loop_result agent_loop::run_streaming(
 
             std::string call_id = call.id.empty() ? ("call_" + std::to_string(result.iterations)) : call.id;
             add_tool_result_message(call.name, call_id, tool_res);
+            tool_calls_used++;
+            if (config_.max_tool_calls > 0 &&
+                subagent_tool_budget_check(tool_calls_used, config_.max_tool_calls) ==
+                    SUBAGENT_TOOL_BUDGET_WARNING) {
+                append_note_to_last_msg("\n" + subagent_tool_budget_note(tool_calls_used, config_.max_tool_calls));
+            }
         }
     }
 

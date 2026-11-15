@@ -80,6 +80,18 @@ struct agent_config {
     // counter exceeds it, the loop stops with TOKEN_BUDGET_EXCEEDED.
     int64_t max_generate_tokens = 0;
 
+    // Tool-call budget for this loop. 0 = unlimited. Set per subagent via the
+    // task tool's "max_tool_calls" parameter: a call beyond the budget is not
+    // executed and the model is told to produce its final answer; at >=80%
+    // usage the tool results carry a "[tool budget: used X of Y]" note.
+    int64_t max_tool_calls = 0;
+
+    // Append an "[iter N/M]" budget note to the last message of every turn so
+    // the loop can pace itself against its iteration limit. Enabled by the
+    // subagent runner only; the note lives in the in-flight request, the
+    // stored history/session file stays clean (the previous note is removed).
+    bool report_iteration_budget = false;
+
     // Wrap tool results in <external_data untrusted="true"> tags and add the
     // matching system-prompt line. Opt-in via --tool-output-guard (default off;
     // off state is byte-identical to the historical prompt protocol).
@@ -349,6 +361,15 @@ private:
                                   const std::string & call_id,
                                   const tool_result & result);
 
+    // Injects the "[iter N/M]" budget note into the last message for the
+    // current turn and removes the previous turn's note (config only with
+    // report_iteration_budget; stored history/session file never sees it).
+    void update_iteration_budget_note(int iteration, int max_iterations);
+
+    // Appends a text note to the last message content; string content only,
+    // structured (image-bearing) content is left untouched.
+    void append_note_to_last_msg(const std::string & note);
+
     // Build assistant message JSON from parsed completion
     json build_assistant_msg(const common_chat_msg & parsed, int iteration);
 
@@ -395,6 +416,9 @@ private:
     }
 
     json messages_;
+    // Exact text of the iteration note currently appended to messages_.back()
+    // (empty when no note is active). See update_iteration_budget_note().
+    std::string active_iter_note_;
     permission_manager permission_mgr_;
     tool_context tool_ctx_;
     session_stats stats_;

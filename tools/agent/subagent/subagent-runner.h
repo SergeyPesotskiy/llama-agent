@@ -26,6 +26,7 @@ struct subagent_params {
     std::string prompt;
     std::string description;  // Short description for display
     int64_t max_tokens = 0;   // Generated-token budget for the sub-loop (0 = off)
+    int max_tool_calls = 0;   // Tool-call budget for the sub-loop (0 = unlimited)
     int timeout_sec = 0;      // Wall-clock timeout in seconds (0 = no timeout)
     int backend_index = -1;   // --subagent-backends index; -1 = auto round-robin
 };
