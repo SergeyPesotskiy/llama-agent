@@ -472,6 +472,14 @@ void http_inference_backend::process_sse_payload(
     }
 
     for (const auto & choice : chunk["choices"]) {
+        // OpenAI-style streams carry the stop cause in finish_reason of the
+        // final chunk; normalize to the llama.cpp stop_type vocabulary
+        // ("length" -> "limit") so one comparison covers both wire dialects.
+        if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
+            std::string finish = choice["finish_reason"].get<std::string>();
+            result.stop_type = (finish == "length") ? "limit" : std::move(finish);
+        }
+
         json delta = json::object();
         if (choice.contains("delta") && choice["delta"].is_object()) {
             delta = choice["delta"];
