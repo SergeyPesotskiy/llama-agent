@@ -29,6 +29,7 @@ set(AGENT_CORE_SOURCES
     tools/tool-glob.cpp
     tools/tool-plan.cpp
     tools/tool-task.cpp
+    reasoning-prune.cpp
     subagent/subagent-limits.cpp
     subagent/subagent-types.cpp
     subagent/subagent-display.cpp
@@ -209,6 +210,14 @@ if(LLAMA_BUILD_TESTS)
     target_compile_features(test-agent-subagent-limits PRIVATE cxx_std_17)
     target_include_directories(test-agent-subagent-limits PRIVATE ../server)
     add_test(NAME agent-subagent-limits COMMAND test-agent-subagent-limits)
+
+    add_executable(test-agent-reasoning-prune
+        test-reasoning-prune.cpp
+        reasoning-prune.cpp
+    )
+    target_link_libraries(test-agent-reasoning-prune PRIVATE llama-common ${CMAKE_THREAD_LIBS_INIT})
+    target_compile_features(test-agent-reasoning-prune PRIVATE cxx_std_17)
+    add_test(NAME agent-reasoning-prune COMMAND test-agent-reasoning-prune)
 
     add_executable(test-agent-inference-backend
         test-inference-backend.cpp

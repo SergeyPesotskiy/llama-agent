@@ -472,6 +472,13 @@ subagent_result subagent_runner::run_internal(const subagent_params & params,
             break;
     }
 
+    // A generation-limit cut is invisible in the text: mark it so the parent
+    // reads the draft as a draft (only when the server reported stop types).
+    if (loop_result.final_truncated && !result.output.empty()) {
+        result.output += "\n";
+        result.output += SUBAGENT_TRUNCATED_NOTE;
+    }
+
     // Per-task stop status (cancel / timeout) vs parent-wide interrupt.
     {
         bool parent_int = parent_tool_ctx_.is_interrupted &&

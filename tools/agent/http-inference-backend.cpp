@@ -441,6 +441,11 @@ void http_inference_backend::process_sse_payload(
         }
     }
 
+    // Stop classification arrives with the final chunk ("stop_type").
+    if (chunk.contains("stop_type") && chunk["stop_type"].is_string()) {
+        result.stop_type = chunk["stop_type"].get<std::string>();
+    }
+
     if (chunk.contains("prompt_progress") && chunk["prompt_progress"].is_object()) {
         inference_event event;
         event.type = inference_event_type::PROMPT_PROGRESS;

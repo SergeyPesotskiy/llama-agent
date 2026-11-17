@@ -22,6 +22,12 @@ constexpr const char * SUBAGENT_TOKEN_BUDGET_NOTE = "[subagent token budget exha
 // parent receives the draft instead of a bare failure string.
 constexpr const char * SUBAGENT_MAX_ITER_NOTE = "[subagent reached maximum iterations — output above is a partial draft]";
 
+// Trailing marker appended when the final answer stopped on the per-turn
+// generation limit (server stop_type "limit"): the text ends mid-thought, so
+// the parent must not treat it as a finished answer. Only added when the
+// server actually reported the stop type.
+constexpr const char * SUBAGENT_TRUNCATED_NOTE = "[finish: answer cut at the generation limit — partial draft]";
+
 // Append assistant narration to the running partial draft kept across loop
 // iterations. The draft is bounded to the last ~8 KB (cuts snapped to UTF-8
 // boundaries) so a cut-off loop can return a useful draft without swamping

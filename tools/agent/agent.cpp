@@ -790,6 +790,7 @@ int main(int argc, char ** argv) {
     int max_subagent_depth = 0;  // 0 = disabled, 1-5 = nesting depth
     bool subagent_own_slot = false;
     bool tool_output_guard = false;  // --tool-output-guard (default off: prompt byte-identical)
+    bool no_reasoning_prune = false;  // --no-reasoning-prune (pruning is on by default)
     bool enable_mcp = true;
     bool enable_skills = true;
     bool enable_agents_md = true;
@@ -1010,6 +1011,13 @@ int main(int argc, char ** argv) {
             }
             argc--;
             i--;
+        } else if (arg == "--no-reasoning-prune") {
+            no_reasoning_prune = true;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
         }
     }
 
@@ -1195,6 +1203,7 @@ int main(int argc, char ** argv) {
     config.subagent_backends = subagent_backends_list;
     config.subagent_no_think = subagent_no_think;
     config.tool_output_guard = tool_output_guard;
+    config.reasoning_prune = !no_reasoning_prune;
     if (use_http_backend && inf.is_llama_server && inf.total_slots == 1) {
         config.inference_id_slot = 0;
     }

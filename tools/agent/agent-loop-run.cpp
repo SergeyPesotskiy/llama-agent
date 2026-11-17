@@ -99,6 +99,7 @@ agent_loop_result agent_loop::run(const json & user_content) {
         if (parsed.tool_calls.empty()) {
             result.stop_reason = agent_stop_reason::COMPLETED;
             result.final_response = parsed.content;
+            result.final_truncated = completion.stop_type == "limit";
             return result;
         }
 

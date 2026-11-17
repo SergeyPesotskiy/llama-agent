@@ -2,6 +2,7 @@
 #include "agent-loop-internal.h"
 #include "subagent/subagent-limits.h"
 #include "tool-output-guard.h"
+#include "reasoning-prune.h"
 #include "tool-parallel.h"
 #include "utf8-sanitize.h"
 
@@ -338,6 +339,14 @@ inference_request agent_loop::build_inference_request(
         }
     }
 
+    // Stored reasoning never helps the server (the chat template renders it
+    // into past assistant turns, where the model did not "think" it). Strip
+    // all blocks so the prompt stays append-only for the KV prefix cache.
+    // Identity when the flag is off, keeping the historical wire protocol.
+    if (config_.reasoning_prune) {
+        strip_wire_reasoning(messages);
+    }
+
     inference_request request;
     request.messages = std::move(messages);
     request.tools = chat_tools;
@@ -621,6 +630,8 @@ agent_loop_result agent_loop::run_streaming(
         if (parsed.tool_calls.empty()) {
             result.stop_reason = agent_stop_reason::COMPLETED;
             result.final_response = parsed.content;
+            // "limit" = generation ran into n_predict: the answer is cut.
+            result.final_truncated = completion.stop_type == "limit";
             on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;
         }

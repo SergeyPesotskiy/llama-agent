@@ -93,6 +93,10 @@ struct inference_result {
     int32_t cached_prompt_tokens = 0;
     bool context_overflow = false;
     bool cancelled = false;
+    // Server stop classification from the final response chunk ("eos",
+    // "limit", ...). "limit" means generation hit n_predict: the answer was
+    // cut mid-stream. Empty for backends that do not report one.
+    std::string stop_type;
     std::string error;
 };
 

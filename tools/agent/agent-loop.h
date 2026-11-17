@@ -96,6 +96,15 @@ struct agent_config {
     // matching system-prompt line. Opt-in via --tool-output-guard (default off;
     // off state is byte-identical to the historical prompt protocol).
     bool tool_output_guard = false;
+
+    // Strip reasoning_content from assistant messages on the wire (default on,
+    // --no-reasoning-prune restores the old protocol). Stored thinking is
+    // otherwise re-sent on every turn: prompt tokens and attention spent on
+    // notes the model does not get back as text. Stripping happens only on the
+    // request copy — the history and session file keep every reasoning block —
+    // and removes ALL blocks (not just old ones) so prompt bytes stay
+    // append-only and the server's prefix KV-cache is never invalidated.
+    bool reasoning_prune = true;
 };
 
 // Result from running the agent loop
@@ -103,6 +112,11 @@ struct agent_loop_result {
     agent_stop_reason stop_reason;
     std::string final_response;
     int iterations = 0;
+    // True when the final answer hit the per-turn generation limit (server
+    // reported stop_type "limit"): the text ends mid-thought and must not be
+    // mistaken for a finished draft. Only set when the server reports stop
+    // types; backends without stop reporting leave it false.
+    bool final_truncated = false;
 };
 
 // Session-level statistics for token tracking.
