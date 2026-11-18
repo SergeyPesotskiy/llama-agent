@@ -1,108 +1,175 @@
-// Unit tests for reasoning-prune: assistant reasoning stripped from wire
-// payloads, everything else byte-identical, idempotent.
-
 #include "reasoning-prune.h"
 
+#include "agent-loop.h"
+
+#include <cassert>
 #include <cstdio>
-#include <string>
-
-static int failures = 0;
-
-#define CHECK(cond)                                                         \
-    do {                                                                    \
-        if (!(cond)) {                                                      \
-            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);    \
-            failures++;                                                     \
-        }                                                                   \
-    } while (0)
-
-
-
-static json assistant_with(const std::string & content, const std::string & thinking) {
-    json msg = {{"role", "assistant"}, {"content", content}};
-    if (!thinking.empty()) {
-        msg["reasoning_content"] = thinking;
-    }
-    return msg;
-}
-
-static void test_strips_every_assistant_block() {
-    json messages = json::array();
-    messages.push_back({{"role", "system"}, {"content", "sys"}});
-    messages.push_back({{"role", "user"}, {"content", "q1"}});
-    messages.push_back(assistant_with("a1", "deep thinking one"));
-    messages.push_back({{"role", "tool"}, {"content", "result"}});
-    messages.push_back(assistant_with("a2", "deep thinking two"));
-    messages.push_back({{"role", "user"}, {"content", "q2"}});
-    messages.push_back(assistant_with("a3", "current turn notes"));
-
-    const std::size_t removed = strip_wire_reasoning(messages);
-
-    CHECK(removed == 3);
-    for (const json & msg : messages) {
-        CHECK(!msg.contains("reasoning_content"));
-    }
-    CHECK(messages[2]["content"] == "a1");
-    CHECK(messages[6]["content"] == "a3");
-    CHECK(messages[0]["content"] == "sys");
-}
-
-static void test_noop_payload_unchanged() {
-    json messages = json::array();
-    messages.push_back({{"role", "system"}, {"content", "sys"}});
-    messages.push_back({{"role", "user"}, {"content", "q"}});
-    messages.push_back(assistant_with("a", ""));
-    const json before = messages;
-
-    CHECK(strip_wire_reasoning(messages) == 0);
-    CHECK(messages == before);
-}
-
-static void test_idempotent_and_stable_prompt_prefix() {
-    json messages = json::array();
-    messages.push_back({{"role", "user"}, {"content", "q"}});
-    messages.push_back(assistant_with("a1", "thinking"));
-    strip_wire_reasoning(messages);
-    const json after_first = messages;
-
-    // A later turn may only append; the already-stripped prefix must not
-    // change again (that is what keeps the server KV-cache valid).
-    messages.push_back({{"role", "tool"}, {"content", "r"}});
-    messages.push_back(assistant_with("a2", "more thinking"));
-    CHECK(strip_wire_reasoning(messages) == 1);
-    for (std::size_t i = 0; i < after_first.size(); i++) {
-        CHECK(messages[i] == after_first[i]);
-    }
-}
-
-static void test_ignores_malformed_entries() {
-    json messages = json::array();
-    messages.push_back("not-an-object");
-    messages.push_back({{"role", "user"}, {"content", "x"}});
-    json user_with_field = {{"role", "user"}, {"content", "y"}};
-    user_with_field["reasoning_content"] = "user-side text kept";
-    messages.push_back(user_with_field);
-
-    CHECK(strip_wire_reasoning(messages) == 0);
-    CHECK(messages[2]["reasoning_content"] == "user-side text kept");
-}
-
-static void test_non_array_is_noop() {
-    json not_array = json::object();
-    CHECK(strip_wire_reasoning(not_array) == 0);
-}
 
 int main() {
-    test_strips_every_assistant_block();
-    test_noop_payload_unchanged();
-    test_idempotent_and_stable_prompt_prefix();
-    test_ignores_malformed_entries();
-    test_non_array_is_noop();
-
-    if (failures == 0) {
-        std::printf("reasoning-prune: all tests passed\n");
-        return 0;
+    // Current turn (after the last user message): reasoning stays verbatim,
+    // the model must see its own notes between tool calls.
+    {
+        nlohmann::ordered_json messages = {
+            {
+                {"role", "user"},
+                {"content", "check the repo"},
+            },
+            {
+                {"role", "assistant"},
+                {"content", ""},
+                {"reasoning_content", "plan: read first"},
+                {"tool_calls", {
+                    {
+                        {"id", "c1"},
+                        {"type", "function"},
+                        {"function", {{"name", "read"}, {"arguments", "{}"}}},
+                    },
+                }},
+            },
+            {
+                {"role", "tool"},
+                {"tool_call_id", "c1"},
+                {"content", "file contents"},
+            },
+            {
+                {"role", "assistant"},
+                {"content", "done"},
+                {"reasoning_content", "wrap up"},
+            },
+        };
+        nlohmann::ordered_json expected = messages;
+        prune_inter_turn_reasoning(messages);
+        assert(messages == expected);
     }
-    std::printf("reasoning-prune: %d FAILURES\n", failures);
-    return 1;
+
+    // Previous turns: reasoning fields and <think> blocks are stripped; the
+    // text of ordinary answers and tool messages is untouched.
+    {
+        nlohmann::ordered_json messages = {
+            {
+                {"role", "system"},
+                {"content", "<think> system mentions think, keep it </think>"},
+            },
+            {
+                {"role", "user"},
+                {"content", "old task"},
+            },
+            {
+                {"role", "assistant"},
+                {"content", "<think>hidden draft</think>visible answer"},
+                {"reasoning_content", "draft notes"},
+            },
+            {
+                {"role", "tool"},
+                {"tool_call_id", "c1"},
+                {"content", "result"},
+            },
+            {
+                {"role", "user"},
+                {"content", "new task"},
+            },
+            {
+                {"role", "assistant"},
+                {"content", "answer"},
+                {"reasoning_content", "current thinking"},
+            },
+        };
+        prune_inter_turn_reasoning(messages);
+        assert(!messages[2].contains("reasoning_content"));
+        assert(messages[2]["content"].get<std::string>() == "visible answer");
+        // system message is not an assistant turn: content untouched
+        assert(messages[0]["content"].get<std::string>() == "<think> system mentions think, keep it </think>");
+        // tool result untouched
+        assert(messages[3]["content"].get<std::string>() == "result");
+        // current turn fully intact
+        assert(messages[5]["reasoning_content"].get<std::string>() == "current thinking");
+        assert(messages[5]["content"].get<std::string>() == "answer");
+    }
+
+    // Multimodal content parts: strip inside text parts of old assistant turns.
+    {
+        nlohmann::ordered_json messages = {
+            {
+                {"role", "user"},
+                {"content", {
+                    {{"type", "text"}, {"text", "look"}},
+                }},
+            },
+            {
+                {"role", "assistant"},
+                {"content", {
+                    {{"type", "text"}, {"text", "<think>draft</think>real text"}},
+                    {{"type", "image_url"}, {"image_url", {{"url", "x"}}}},
+                }},
+            },
+            {
+                {"role", "user"},
+                {"content", "next"},
+            },
+        };
+        prune_inter_turn_reasoning(messages);
+        assert(messages[1]["content"][0]["text"].get<std::string>() == "real text");
+        assert(messages[1]["content"][1].contains("image_url"));
+    }
+
+    // Dangling (unclosed) <think> is left alone — only complete pairs are
+    // safe to remove.
+    {
+        nlohmann::ordered_json messages = {
+            {
+                {"role", "user"},
+                {"content", "a"},
+            },
+            {
+                {"role", "assistant"},
+                {"content", "<think>oops no closing"},
+            },
+            {
+                {"role", "user"},
+                {"content", "b"},
+            },
+        };
+        nlohmann::ordered_json expected = messages;
+        prune_inter_turn_reasoning(messages);
+        assert(messages == expected);
+    }
+
+    // No user message at all: nothing is treated as a past turn.
+    {
+        nlohmann::ordered_json messages = {
+            {
+                {"role", "system"},
+                {"content", "sys"},
+            },
+            {
+                {"role", "assistant"},
+                {"content", "hi"},
+                {"reasoning_content", "thinking"},
+            },
+        };
+        nlohmann::ordered_json expected = messages;
+        prune_inter_turn_reasoning(messages);
+        assert(messages == expected);
+    }
+
+    // Empty and non-array inputs are safe no-ops.
+    {
+        nlohmann::ordered_json messages = json::array();
+        prune_inter_turn_reasoning(messages);
+        assert(messages.empty());
+        nlohmann::ordered_json broken = json::object();
+        prune_inter_turn_reasoning(broken);
+        assert(broken.is_object());
+    }
+
+    // Pruning is enabled by default; storage and separation are opt-in.
+    {
+        agent_config config;
+        assert(config.reasoning_prune);
+        assert(!config.store_reasoning);
+        assert(!config.keep_reasoning_separate);
+    }
+
+    printf("OK: inter-turn reasoning pruning\n");
+    return 0;
 }

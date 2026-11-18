@@ -658,7 +658,7 @@ inference_result http_inference_backend::complete(
         // whole answer in the reasoning channel with content null. Surface it as
         // content so the loop sees text (and can continue or stop honestly)
         // instead of getting an empty assistant turn.
-        if (content.empty() && !reasoning.empty()) {
+        if (content.empty() && !reasoning.empty() && !request.keep_reasoning_separate) {
             content = std::move(reasoning);
             reasoning.clear();
         }

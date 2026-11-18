@@ -339,17 +339,19 @@ inference_request agent_loop::build_inference_request(
         }
     }
 
-    // Stored reasoning never helps the server (the chat template renders it
-    // into past assistant turns, where the model did not "think" it). Strip
-    // all blocks so the prompt stays append-only for the KV prefix cache.
-    // Identity when the flag is off, keeping the historical wire protocol.
+    // Anthropic-style wire policy: the current turn's reasoning rides along
+    // (the model needs its own working notes between tool calls), everything
+    // before the last user turn is stripped — that point is exactly where the
+    // server's prefix cache resets, so the trim is free. Full echo when the
+    // flag is off.
     if (config_.reasoning_prune) {
-        strip_wire_reasoning(messages);
+        prune_inter_turn_reasoning(messages);
     }
 
     inference_request request;
     request.messages = std::move(messages);
     request.tools = chat_tools;
+    request.keep_reasoning_separate = config_.keep_reasoning_separate;
     request.stream = true;
     request.timings_per_token = true;
     request.cache_prompt = true;
@@ -464,7 +466,7 @@ json agent_loop::build_assistant_msg(const common_chat_msg & parsed, int iterati
     msg["role"] = "assistant";
     msg["content"] = parsed.content;
 
-    if (!parsed.reasoning_content.empty()) {
+    if (config_.store_reasoning && !parsed.reasoning_content.empty()) {
         msg["reasoning_content"] = parsed.reasoning_content;
     }
 

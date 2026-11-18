@@ -100,11 +100,24 @@ struct agent_config {
     // Strip reasoning_content from assistant messages on the wire (default on,
     // --no-reasoning-prune restores the old protocol). Stored thinking is
     // otherwise re-sent on every turn: prompt tokens and attention spent on
-    // notes the model does not get back as text. Stripping happens only on the
-    // request copy — the history and session file keep every reasoning block —
-    // and removes ALL blocks (not just old ones) so prompt bytes stay
-    // append-only and the server's prefix KV-cache is never invalidated.
+    // Anthropic-style wire policy (default on): the current turn's reasoning
+    // stays on the wire so the model sees its own thinking between tool
+    // calls, while everything before the LAST user turn is stripped from the
+    // request copy (reasoning_content fields and <think> blocks inside
+    // assistant content). The boundary is where the prefix KV-cache resets
+    // anyway, so pruning is free. Session/history stay byte-complete.
     bool reasoning_prune = true;
+
+    // --store-reasoning: keep the model's reasoning field in the assistant
+    // history and session file. Off by default (today's behavior: the field
+    // is dropped once streamed).
+    bool store_reasoning = false;
+
+    // --keep-reasoning-separate: do not merge reasoning into an empty
+    // answer (some servers, e.g. thinking-by-default Strata/Qwen3 setups,
+    // return the whole draft in the reasoning channel). Off by default,
+    // which keeps today's merge behavior.
+    bool keep_reasoning_separate = false;
 };
 
 // Result from running the agent loop

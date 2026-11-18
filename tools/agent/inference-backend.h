@@ -58,6 +58,10 @@ struct inference_request {
 
     bool cache_prompt = true;
     bool return_progress = true;
+
+    // Keep reasoning in its own field even when content came back empty
+    // (agent_config.keep_reasoning_separate). Default false = legacy merge.
+    bool keep_reasoning_separate = false;
     int32_t id_slot = -1;
 
     bool parse_tool_calls = true;
